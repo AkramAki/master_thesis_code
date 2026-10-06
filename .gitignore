@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Environments and editors
+.venv/
+.env
+.idea/
+.vscode/
+.DS_Store
+
+# Local research artifacts
+data/*
+!data/.gitkeep
+outputs/*
+!outputs/.gitkeep
+notebooks/.ipynb_checkpoints/
+*.ckpt
+
+# Experiment tracking
+lightning_logs/
+wandb/
+mlruns/
