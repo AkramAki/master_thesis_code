@@ -57,14 +57,14 @@ environment_prefix() {
 
 environment_created=0
 if ! environment_exists; then
-    mamba create --yes --name "$ENV_NAME" --channel conda-forge python uv
+    mamba create --yes --name "$ENV_NAME" --channel conda-forge python uv nbstripout
     environment_created=1
 fi
 
 # Use radio-dev's Python to resolve its own prefix. An existing environment
 # without Python is incomplete, so repair its core packages first.
 if ! env_prefix="$(environment_prefix)"; then
-    mamba install --yes --name "$ENV_NAME" --channel conda-forge python uv
+    mamba install --yes --name "$ENV_NAME" --channel conda-forge python uv nbstripout
     env_prefix="$(environment_prefix)" ||
         fail "Could not locate Python in environment $ENV_NAME."
 fi
@@ -78,6 +78,13 @@ validate_environment() {
             return 1
     done
     mamba run --prefix "$env_prefix" uv pip check --python "$env_python" >/dev/null ||
+        return 1
+    mamba run --prefix "$env_prefix" "$env_python" -c 'import nbstripout' >/dev/null ||
+        return 1
+    (
+        cd -- "$PROJECT_ROOT"
+        mamba run --prefix "$env_prefix" nbstripout --is-installed >/dev/null
+    ) ||
         return 1
     mamba run --prefix "$env_prefix" "$env_python" - \
         "$REPOS_DIR" "$WITH_CUDA" "$PROJECT_ROOT" <<'PY'
@@ -118,7 +125,7 @@ fi
 
 printf 'Creating or repairing environment: %s\n' "$env_prefix"
 if [[ "$environment_created" == 0 ]]; then
-    mamba install --yes --name "$ENV_NAME" --channel conda-forge python uv
+    mamba install --yes --name "$ENV_NAME" --channel conda-forge python uv nbstripout
 fi
 env_python="$env_prefix/bin/python"
 [[ -x "$env_python" ]] || fail "Python is missing from $env_prefix."
@@ -149,6 +156,12 @@ if [[ "$WITH_CUDA" == 1 ]]; then
 else
     printf 'Skipping cuFINUFFT (WITH_CUDA=0).\n'
 fi
+
+printf 'Installing nbstripout Git filter\n'
+(
+    cd -- "$PROJECT_ROOT"
+    mamba run --prefix "$env_prefix" nbstripout --install --attributes .gitattributes
+)
 
 if ! validate_environment; then
     printf 'Warning: environment %s failed its final validation.\n' "$ENV_NAME" >&2

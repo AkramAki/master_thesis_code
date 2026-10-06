@@ -16,8 +16,20 @@ FORCE="${FORCE:-0}"
 [[ "$FORCE" == 0 || "$FORCE" == 1 ]] || fail 'FORCE must be 0 or 1.'
 command -v mamba >/dev/null || fail 'mamba must be installed and available on PATH.'
 
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
 environment_exists() {
     mamba list --name "$ENV_NAME" >/dev/null 2>&1
+}
+
+remove_nbstripout_filter() {
+    command -v git >/dev/null || return 0
+    git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+        return 0
+    git -C "$PROJECT_ROOT" config --local --remove-section filter.nbstripout >/dev/null 2>&1 ||
+        true
+    git -C "$PROJECT_ROOT" config --local --remove-section diff.ipynb >/dev/null 2>&1 ||
+        true
 }
 
 repos=(radiotools pyvisgrid pyvisgen radiosim)
@@ -46,6 +58,7 @@ if [[ "$DELETE_REPOS" == 1 ]]; then
 fi
 
 if environment_exists; then
+    remove_nbstripout_filter
     printf 'Removing Mamba environment %s\n' "$ENV_NAME"
     mamba env remove --yes --name "$ENV_NAME"
     if environment_exists; then
