@@ -8,6 +8,11 @@ version = "0.1.0"
 description = "Machine-learning experiments for radio astronomy"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "lightning>=2.2,<3",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/radio_diffusion"]

@@ -1,7 +1,17 @@
 # Radio Diffusion
 
-Research code for the master thesis. The repository starts with a small `src/`
-layout and will grow as the implementation requires it.
+Master's thesis research code for developing diffusion models with PyTorch
+Lightning for radio astronomy. The goal is to train on MOJAVE images stored in
+FITS files. MNIST is the initial dataset for learning and developing the pipeline.
+
+Data loading, neural networks, diffusion, and training will be separate components
+so datasets and experiment settings can be changed independently. The project
+grows in small steps; the intended layout is described in
+[the structure plan](docs/structure-plan.md).
+
+Use [notebooks/](notebooks/) for interactive checks and exploration. Notebooks
+call the reusable code in `src/radio_diffusion/` and run with the development
+environment as their kernel.
 
 ## Setup
 
@@ -24,5 +34,9 @@ git switch fix_output_path
 Use `WITH_CUDA=0` when creating a CPU-only environment. Run `make help` for the
 environment deletion options.
 
-The current repository contains only the environment helpers and the empty
-`radio_diffusion` package.
+To install or update just this package and its dependencies in an existing
+Python 3.11+ environment:
+
+```bash
+python -m pip install -e .
+```

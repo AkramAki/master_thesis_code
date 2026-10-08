@@ -33,7 +33,6 @@ scripts/
 notebooks/
 data/
 outputs/
-tests/
 ```
 
 Create each directory or module when its first real use appears.
