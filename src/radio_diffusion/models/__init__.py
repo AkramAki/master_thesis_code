@@ -1,1 +1,1 @@
-"""Image-generation models and their supporting operations."""
+"""Reusable neural network architectures."""

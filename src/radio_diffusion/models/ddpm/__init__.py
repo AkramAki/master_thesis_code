@@ -1,1 +1,0 @@
-"""Denoising diffusion probabilistic models."""

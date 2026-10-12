@@ -9,7 +9,7 @@ from torchvision import transforms
 from torchvision.datasets import MNIST
 
 
-class _ImagesOnly(Dataset):
+class _MNISTWithoutLabels(Dataset):
     """Keep digit labels out of the generative model's batch format."""
 
     def __init__(self, dataset: MNIST) -> None:
@@ -24,10 +24,17 @@ class _ImagesOnly(Dataset):
 
 
 class MNISTDataModule(LightningDataModule):
-    """Return float32 batches of shape [B, 1, 28, 28], scaled to [-1, 1].
+    """MNIST data module for unconditional image generation.
 
-    Downloads are disabled by default. Only ``prepare_data`` may download;
-    ``setup`` loads local files and creates a seeded train/validation split.
+    Returns images normalized to [-1, 1] with shape [B, 1, 28, 28].
+
+    Args:
+        data_dir: Directory containing the MNIST dataset (or where it should be downloaded).
+        batch_size: Number of images per batch.
+        num_workers: Number of workers for data loading.
+        val_fraction: Fraction of training data used for validation.
+        seed: Random seed for reproducible splitting.
+        download: Whether to download MNIST if missing.
     """
 
     def __init__(
@@ -35,17 +42,17 @@ class MNISTDataModule(LightningDataModule):
         data_dir: str | Path,
         batch_size: int = 64,
         num_workers: int = 0,
-        val_size: int = 5000,
+        val_fraction: float = 0.1,
         seed: int = 42,
         download: bool = False,
     ) -> None:
         super().__init__()
-        if batch_size < 1 or num_workers < 0 or val_size < 1:
-            raise ValueError("batch_size and val_size must be positive; num_workers must be >= 0.")
+        if batch_size < 1 or num_workers < 0 or val_fraction <= 0 or val_fraction >= 1:
+            raise ValueError("batch_size must be positive; num_workers must be >= 0; val_fraction must be between 0 and 1.")
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.val_size = val_size
+        self.val_fraction = val_fraction
         self.seed = seed
         self.download = download
         self.transform = transforms.Compose([
@@ -53,7 +60,7 @@ class MNISTDataModule(LightningDataModule):
             transforms.Normalize((0.5,), (0.5,)),
         ])
 
-    def _dataset(self, train: bool, download: bool = False) -> MNIST:
+    def _load_mnist(self, train: bool, download: bool = False) -> MNIST:
         try:
             return MNIST(
                 root=str(self.data_dir), train=train,
@@ -69,22 +76,27 @@ class MNISTDataModule(LightningDataModule):
             ) from exc
 
     def prepare_data(self) -> None:
-        """Check both official splits, downloading only when authorized."""
-        self._dataset(train=True, download=self.download)
-        self._dataset(train=False, download=self.download)
+        """Download MNIST files if they are not already present in the data_dir."""
+        self._load_mnist(train=True, download=self.download)
+        self._load_mnist(train=False, download=self.download)
 
     def setup(self, stage: str | None = None) -> None:
         if stage in (None, "fit", "validate"):
-            dataset = _ImagesOnly(self._dataset(train=True))
-            if self.val_size >= len(dataset):
-                raise ValueError("val_size must be smaller than the training dataset.")
+            dataset = _MNISTWithoutLabels(self._load_mnist(train=True))
+
+            val_size = int(len(dataset) * self.val_fraction)
+
+            if not 0 < val_size < len(dataset):
+                raise ValueError("val_fraction must produce a non-empty train and validation split.")
+
             self.train_dataset, self.val_dataset = random_split(
                 dataset,
-                [len(dataset) - self.val_size, self.val_size],
+                [len(dataset) - val_size, val_size],
                 generator=torch.Generator().manual_seed(self.seed),
             )
+
         if stage in (None, "test"):
-            self.test_dataset = _ImagesOnly(self._dataset(train=False))
+            self.test_dataset = _MNISTWithoutLabels(self._load_mnist(train=False))
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(

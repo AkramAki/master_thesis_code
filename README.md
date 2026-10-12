@@ -4,9 +4,26 @@ Master's thesis research code for developing diffusion models with PyTorch
 Lightning for radio astronomy. The goal is to train on MOJAVE images stored in
 FITS files. MNIST is the initial dataset for learning and developing the pipeline.
 
-Data loading, neural networks, diffusion, and training will be separate components
-so datasets and experiment settings can be changed independently. The project
-grows in small steps; the intended layout is described in
+Data loading, neural networks, diffusion methods, and training are separate
+components so each can change independently. The current source layout is:
+
+```text
+src/radio_diffusion/
+├── data/
+│   └── mnist.py
+├── models/
+│   └── unet.py
+├── diffusion/
+│   └── ddpm.py
+└── training/
+    └── module.py
+```
+
+`models/unet.py` contains the reusable noise-prediction network.
+`diffusion/ddpm.py` contains the self-contained Gaussian forward and reverse
+processes, configurable noise schedule, and sampling loop. The Lightning
+training logic lives in `training/module.py`. New modules are added only when
+they have a real implementation; the longer-term direction is described in
 [the structure plan](docs/structure-plan.md).
 
 Use [notebooks/](notebooks/) for interactive checks and exploration. Notebooks

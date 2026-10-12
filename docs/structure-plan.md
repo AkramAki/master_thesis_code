@@ -1,45 +1,36 @@
-# Project structure plan (generated with an LLM to maybe steer this repo)
+# Project structure
 
-This document records possible structure without requiring empty directories or
-placeholder implementations before they are useful.
+The source tree separates data loading, network architectures, diffusion
+methods, and training logic. Directories and modules are added only when their
+first real implementation is needed.
 
 ```text
-configs/
-├── data/
-├── experiment/
-├── model/
-├── trainer/
-└── tuning/
-
 src/radio_diffusion/
 ├── data/
+│   └── mnist.py
 ├── models/
-│   └── ddpm/
-│       ├── unet.py
-│       ├── diffusion.py
-│       └── module.py
-├── training/
-│   └── train.py
-├── metrics/
-├── callbacks/
-└── utils/
-
-scripts/
-├── train.py
-├── tune.py
-├── evaluate.py
-└── sample.py
-
-notebooks/
-data/
-outputs/
+│   └── unet.py
+├── diffusion/
+│   └── ddpm.py
+└── training/
+    └── module.py
 ```
 
-Create each directory or module when its first real use appears.
+The boundaries are intentionally direct:
+
+- `data/` owns dataset loading and preprocessing.
+- `models/` owns reusable PyTorch network architectures.
+- `diffusion/` owns self-contained forward and reverse diffusion processes,
+  their schedules, and sampling.
+- `training/` owns Lightning training, validation, and optimizer logic.
+
+This keeps the U-Net independent of DDPM so another diffusion method can reuse
+it, and keeps diffusion operations independent of Lightning.
 
 ## Training architecture
 
-The reusable entry point should eventually be conceptually equivalent to:
+When a reusable training entry point is needed, it should be conceptually
+equivalent to:
 
 ```python
 def train(config) -> TrainingResult:
@@ -50,12 +41,6 @@ One call performs one training run. It constructs the selected model and
 DataModule, constructs the PyTorch Lightning `Trainer`, trains, and returns
 metrics and checkpoint information. CLI and future Optuna code should call this
 function instead of owning separate training logic.
-
-The DDPM modules should have narrow responsibilities:
-
-- `unet.py`: PyTorch network architecture.
-- `diffusion.py`: noise schedules, forward/reverse diffusion, and sampling.
-- `module.py`: Lightning training, validation, and optimizer logic.
 
 ## Configuration
 
