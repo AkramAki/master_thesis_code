@@ -3,6 +3,8 @@
 import torch
 from torch import nn
 
+from tqdm.auto import tqdm
+
 
 class GaussianDiffusion(nn.Module):
     """Manage a Gaussian noise schedule and its forward diffusion process.
@@ -179,12 +181,18 @@ class GaussianDiffusion(nn.Module):
                 device = next(model.parameters()).device
             except StopIteration as exc:
                 raise ValueError("model must have parameters or device must be provided.") from exc
-
+    
         images = torch.randn(shape, device=device)
         was_training = model.training
         model.eval()
+    
         try:
-            for timestep in reversed(range(self.num_steps)):
+            for timestep in tqdm(
+                reversed(range(self.num_steps)),
+                total=self.num_steps,
+                desc="Sampling",
+                unit="step",
+            ):
                 timesteps = torch.full(
                     (shape[0],),
                     timestep,
@@ -194,5 +202,5 @@ class GaussianDiffusion(nn.Module):
                 images = self.reverse_step(model, images, timesteps)
         finally:
             model.train(was_training)
-
+    
         return images
