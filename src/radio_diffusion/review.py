@@ -8,11 +8,13 @@ import csv
 from copy import deepcopy
 from dataclasses import dataclass
 from html import escape
+from math import isfinite
 from pathlib import Path
 import re
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import PowerNorm
+from matplotlib.ticker import MaxNLocator
 import torch
 from torchvision.utils import make_grid
 from tqdm.auto import tqdm
@@ -220,62 +222,143 @@ def common_validation_images(runs, *, count=4, seed=42):
     return images, selected_paths
 
 
-def _shared_norm(batches, gamma):
-    """Use one raw-intensity scale across every panel in a figure."""
-    low = min(float(batch.min()) for batch in batches)
-    high = max(float(batch.max()) for batch in batches)
-    return PowerNorm(gamma=gamma, vmin=low, vmax=high if high > low else low + 1)
+def _shared_norm(batches, gamma, limits=None):
+    """Use shared raw-intensity limits, either automatic or an explicit pair."""
+    if limits is None:
+        low = min(float(batch.min()) for batch in batches)
+        high = max(float(batch.max()) for batch in batches)
+        if high <= low:
+            high = low + 1
+    else:
+        low, high = limits
+        if not (isfinite(low) and isfinite(high) and low < high):
+            raise ValueError("limits must be two finite values with minimum < maximum.")
+    return PowerNorm(gamma=gamma, vmin=low, vmax=high)
 
 
-def show_grids(batches, titles, *, nrow=4, gamma=0.5):
-    """Show adjacent image grids with shared scaling and no data normalization."""
+def _image_with_colorbar(figure, ax, image, gamma):
+    """Draw one independently scaled image with a white outline and its own bar."""
+    artist = ax.imshow(
+        image[0].numpy(), cmap="inferno", norm=_shared_norm([image], gamma),
+        interpolation="nearest",
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_edgecolor("white")
+        spine.set_linewidth(1.5)
+    colorbar = figure.colorbar(
+        artist, ax=ax, fraction=0.05, pad=0.03, shrink=0.8,
+        ticks=MaxNLocator(nbins=3),
+    )
+    colorbar.ax.tick_params(labelsize=7)
+    colorbar.ax.yaxis.get_offset_text().set_fontsize(7)
+    return artist
+
+
+def show_grids(
+    batches, titles, *, nrow=4, gamma=0.5, limits=None,
+    independent_colorbars=False,
+):
+    """Show white-bordered grids with shared limits or independently scaled tiles.
+
+    With independent_colorbars=True, each tile has its own automatic range and
+    colorbar; limits is ignored. Model grids remain adjacent with paired positions.
+    """
     batches = [batch.detach().cpu() for batch in batches]
-    norm = _shared_norm(batches, gamma)
+    if independent_colorbars:
+        if nrow < 1:
+            raise ValueError("nrow must be positive.")
+        image_count = max(len(batch) for batch in batches)
+        columns = min(nrow, image_count)
+        rows = (image_count + columns - 1) // columns
+        fig = plt.figure(
+            figsize=(9 * len(batches), 2.8 * rows), layout="constrained",
+        )
+        panels = fig.subfigures(1, len(batches), squeeze=False)
+        for panel, batch, title in zip(panels[0], batches, titles):
+            panel.suptitle(f"{title}\nIndependent image scales")
+            axes = panel.subplots(rows, columns, squeeze=False)
+            for index, ax in enumerate(axes.flat):
+                if index >= len(batch):
+                    ax.axis("off")
+                    continue
+                _image_with_colorbar(panel, ax, batch[index], gamma)
+                ax.set_title(f"Image {index + 1}", fontsize=9)
+        plt.show()
+        return
+
+    norm = _shared_norm(batches, gamma, limits=limits)
+    cmap = plt.get_cmap("inferno").with_extremes(bad="white")
     fig, axes = plt.subplots(
         1, len(batches), figsize=(7 * len(batches), 7),
         squeeze=False, layout="constrained",
     )
     for ax, batch, title in zip(axes[0], batches, titles):
-        grid = make_grid(batch, nrow=nrow, pad_value=norm.vmin)
-        artist = ax.imshow(grid[0].numpy(), cmap="inferno", norm=norm)
+        # Give each tile a white border without assigning it an intensity value.
+        # Borders are added only to the display copy, after computing the scale.
+        bordered = torch.nn.functional.pad(batch, (2, 2, 2, 2), value=float("nan"))
+        grid = make_grid(bordered, nrow=nrow, padding=0, pad_value=float("nan"))
+        artist = ax.imshow(
+            grid[0].numpy(), cmap=cmap, norm=norm, interpolation="nearest",
+        )
         ax.set_title(title)
         ax.axis("off")
     fig.colorbar(artist, ax=list(axes[0]), shrink=0.7, label="Raw intensity (shared scale)")
     plt.show()
 
 
-def show_reconstructions(clean, noisy, reconstructed, labels, *, gamma=0.5):
-    """Plot original / shared noisy input / A / B for each validation image."""
+def show_reconstructions(
+    clean, noisy, reconstructed, labels, *, gamma=0.5, limits=None,
+    independent_colorbars=False,
+):
+    """Compare originals and reconstructions with shared or per-image colorbars.
+
+    Independent colorbars use each image's automatic range and ignore limits.
+    """
     batches = [batch.detach().cpu() for batch in (clean, noisy, *reconstructed)]
     # Keep the original and reconstructed intensities comparable. Gaussian noise
     # has a separate, explicitly labelled scale so it cannot flatten radio detail.
-    norm = _shared_norm([batches[0], *batches[2:]], gamma)
-    noise_norm = _shared_norm([batches[1]], 1)
-    titles = ["Original", "Shared noisy input\n(separate scale)", *labels]
+    if not independent_colorbars:
+        norm = _shared_norm([batches[0], *batches[2:]], gamma, limits=limits)
+        noise_norm = _shared_norm([batches[1]], 1)
+    noise_title = (
+        "Shared noisy input" if independent_colorbars
+        else "Shared noisy input\n(separate scale)"
+    )
+    titles = ["Original", noise_title, *labels]
     fig, axes = plt.subplots(
         len(clean), len(batches), figsize=(12, 2.7 * len(clean)),
         squeeze=False, layout="constrained",
     )
+    if independent_colorbars:
+        fig.suptitle("Each image uses its own intensity scale")
     for column, (batch, title) in enumerate(zip(batches, titles)):
         for row, image in enumerate(batch):
-            artist = axes[row, column].imshow(
-                image[0].numpy(), cmap="inferno",
-                norm=noise_norm if column == 1 else norm,
-            )
+            if independent_colorbars:
+                _image_with_colorbar(
+                    fig, axes[row, column], image, 1 if column == 1 else gamma,
+                )
+            else:
+                artist = axes[row, column].imshow(
+                    image[0].numpy(), cmap="inferno",
+                    norm=noise_norm if column == 1 else norm,
+                )
             axes[row, column].set_xticks([])
             axes[row, column].set_yticks([])
             if row == 0:
                 axes[row, column].set_title(title)
             if column == 0:
                 axes[row, column].set_ylabel(f"Image {row + 1}")
-    fig.colorbar(
-        artist, ax=list(axes[:, [0, *range(2, len(batches))]].flat),
-        shrink=0.6, label="Raw intensity (original + reconstructions)",
-    )
-    fig.colorbar(
-        axes[0, 1].images[0], ax=list(axes[:, 1]),
-        shrink=0.6, label="Noisy input intensity",
-    )
+    if not independent_colorbars:
+        fig.colorbar(
+            artist, ax=list(axes[:, [0, *range(2, len(batches))]].flat),
+            shrink=0.6, label="Raw intensity (original + reconstructions)",
+        )
+        fig.colorbar(
+            axes[0, 1].images[0], ax=list(axes[:, 1]),
+            shrink=0.6, label="Noisy input intensity",
+        )
     plt.show()
 
 
@@ -283,8 +366,14 @@ def _snapshot_epoch(path):
     return int(re.search(r"epoch=(\d+)", path.name).group(1))
 
 
-def show_training_progress(runs, labels, *, max_snapshots=6, sample_count=2, gamma=0.5):
-    """Show a few fixed sample identities across saved epochs for each model."""
+def show_training_progress(
+    runs, labels, *, max_snapshots=6, sample_count=2, gamma=0.5, limits=None,
+    independent_colorbars=False,
+):
+    """Show fixed samples across epochs with shared or independent image scales.
+
+    Independent colorbars use each image's automatic range and ignore limits.
+    """
     if max_snapshots < 2 or sample_count < 1:
         raise ValueError("Use at least two snapshot columns and one sample row.")
     histories = []
@@ -306,9 +395,11 @@ def show_training_progress(runs, labels, *, max_snapshots=6, sample_count=2, gam
         histories.append((run, label, files, batches))
     if not histories:
         return
-    norm = _shared_norm(
-        [batch for _, _, _, batches in histories for batch in batches], gamma,
-    )
+    if not independent_colorbars:
+        norm = _shared_norm(
+            [batch for _, _, _, batches in histories for batch in batches], gamma,
+            limits=limits,
+        )
     for run, label, files, batches in histories:
         rows = min(len(batch) for batch in batches)
         fig, axes = plt.subplots(
@@ -317,9 +408,12 @@ def show_training_progress(runs, labels, *, max_snapshots=6, sample_count=2, gam
         )
         for column, (path, batch) in enumerate(zip(files, batches)):
             for row in range(rows):
-                artist = axes[row, column].imshow(
-                    batch[row, 0].numpy(), cmap="inferno", norm=norm,
-                )
+                if independent_colorbars:
+                    _image_with_colorbar(fig, axes[row, column], batch[row], gamma)
+                else:
+                    artist = axes[row, column].imshow(
+                        batch[row, 0].numpy(), cmap="inferno", norm=norm,
+                    )
                 axes[row, column].set_xticks([])
                 axes[row, column].set_yticks([])
                 if row == 0:
@@ -327,11 +421,15 @@ def show_training_progress(runs, labels, *, max_snapshots=6, sample_count=2, gam
                 if column == 0:
                     axes[row, column].set_ylabel(f"Saved sample {row + 1}")
         saved_seed = run.config.get("samples", {}).get("seed", run.config["run"]["seed"])
-        fig.suptitle(f"{label} — training progression (saved seed {saved_seed})")
-        fig.colorbar(
-            artist, ax=list(axes.flat), shrink=0.6,
-            label="Raw intensity (shared across both models)",
-        )
+        title = f"{label} — training progression (saved seed {saved_seed})"
+        if independent_colorbars:
+            title += "\nIndependent image scales"
+        fig.suptitle(title)
+        if not independent_colorbars:
+            fig.colorbar(
+                artist, ax=list(axes.flat), shrink=0.6,
+                label="Raw intensity (shared across both models)",
+            )
         plt.show()
 
 
