@@ -9,6 +9,8 @@ components so each can change independently. The current source layout is:
 
 ```text
 src/radio_diffusion/
+├── experiment.py
+├── review.py
 ├── data/
 │   └── mnist.py
 ├── models/
@@ -29,6 +31,14 @@ they have a real implementation; the longer-term direction is described in
 Use [notebooks/](notebooks/) for interactive checks and exploration. Notebooks
 call the reusable code in `src/radio_diffusion/` and run with the development
 environment as their kernel.
+
+`review.py` provides reusable helpers for saved-run discovery, reproducible
+inference, and comparison plots. In
+[review_saved_run.ipynb](notebooks/review_saved_run.ipynb), list the saved runs,
+choose models A and B, and set the seed near the top. The notebook shows shared
+noise, adjacent 4×4 generated-image grids, archived training samples and losses,
+then reconstructions of validation images held out from both runs. Run it in
+the training environment with the saved outputs and dataset available.
 
 ## Setup
 

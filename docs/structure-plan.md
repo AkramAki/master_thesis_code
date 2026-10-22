@@ -6,6 +6,8 @@ first real implementation is needed.
 
 ```text
 src/radio_diffusion/
+├── experiment.py
+├── review.py
 ├── data/
 │   └── mnist.py
 ├── models/
@@ -23,9 +25,18 @@ The boundaries are intentionally direct:
 - `diffusion/` owns self-contained forward and reverse diffusion processes,
   their schedules, and sampling.
 - `training/` owns Lightning training, validation, and optimizer logic.
+- `experiment.py` builds configured components and restores checkpoints.
+- `review.py` provides saved-run discovery, reproducible inference, and plots
+  that review notebooks can share.
 
 This keeps the U-Net independent of DDPM so another diffusion method can reuse
 it, and keeps diffusion operations independent of Lightning.
+
+Review notebooks hold the user choices, such as selected runs, seeds, and the
+order of figures. Reusable review operations live in the package so notebooks
+can import them without managing helper paths. Low-level diffusion steps stay
+in `diffusion/`; `review.py` combines them for comparisons. Keep helpers grouped
+by this purpose rather than accumulating unrelated functions in `utils.py`.
 
 ## Training architecture
 
