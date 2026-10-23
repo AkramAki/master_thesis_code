@@ -5,9 +5,9 @@ from typing import Any
 import torch
 from lightning.pytorch import LightningModule
 from torch import nn
-from torch.nn import functional as F
 
 from radio_diffusion.diffusion.ddpm import GaussianDiffusion
+from radio_diffusion.training.losses import WeightedLoss
 
 
 class DDPMModule(LightningModule):
@@ -21,6 +21,7 @@ class DDPMModule(LightningModule):
         optimizer_name: str = "Adam",
         optimizer_kwargs: dict[str, Any] | None = None,
         validation_seed: int | None = None,
+        loss_function: WeightedLoss | None = None,
     ) -> None:
         super().__init__()
         if learning_rate <= 0:
@@ -34,6 +35,9 @@ class DDPMModule(LightningModule):
         self.optimizer_name = optimizer_name
         self.optimizer_kwargs = dict(optimizer_kwargs or {})
         self.validation_seed = validation_seed
+        self.loss_function = (
+            loss_function if loss_function is not None else WeightedLoss(["MSELoss"], [1.0])
+        )
 
     def forward(
         self,
@@ -70,7 +74,16 @@ class DDPMModule(LightningModule):
             images, timesteps, noise=noise
         )
         predicted_noise = self(noisy_images, timesteps)
-        loss = F.mse_loss(predicted_noise, noise)
+        loss, loss_terms = self.loss_function.compute(predicted_noise, noise)
+
+        for name, term in loss_terms.items():
+            self.log(
+                f"{stage}_loss_{name}",
+                term,
+                on_step=stage == "train",
+                on_epoch=True,
+                batch_size=len(images),
+            )
 
         self.log(
             f"{stage}_loss",

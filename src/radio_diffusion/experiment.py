@@ -18,6 +18,7 @@ from radio_diffusion.data.mojave import MojaveDataModule
 from radio_diffusion.diffusion.ddpm import GaussianDiffusion
 from radio_diffusion.models.unet import UNet
 from radio_diffusion.training.callbacks import SampleGridCallback
+from radio_diffusion.training.losses import WeightedLoss
 from radio_diffusion.training.module import DDPMModule
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -53,10 +54,12 @@ class TrainerSettings:
 
 
 def load_config(path: str | Path) -> ExperimentConfig:
-    """Load an experiment configuration from a TOML file."""
+    """Load a TOML experiment configuration and validate its losses."""
     source_path = Path(path).expanduser().resolve()
     with source_path.open("rb") as config_file:
-        return ExperimentConfig(tomllib.load(config_file), source_path)
+        config = ExperimentConfig(tomllib.load(config_file), source_path)
+    build_loss(config)
+    return config
 
 
 def seed_experiment(config: dict[str, Any]) -> None:
@@ -99,8 +102,19 @@ def build_data_module(config: dict[str, Any]) -> MojaveDataModule:
     return MojaveDataModule(**data_config)
 
 
+def build_loss(config: dict[str, Any]) -> WeightedLoss:
+    """Build validated noise losses; older configs retain unweighted MSE."""
+    if "loss" not in config:
+        return WeightedLoss(["MSELoss"], [1.0])
+    loss_config = config["loss"]
+    if not isinstance(loss_config, dict) or set(loss_config) != {"loss", "weights"}:
+        raise ValueError("[loss] must contain only the loss and weights lists.")
+    return WeightedLoss(loss_config["loss"], loss_config["weights"])
+
+
 def build_training_module(config: dict[str, Any]) -> DDPMModule:
-    """Build the Lightning module, including its configured optimizer."""
+    """Build the Lightning module, including its configured optimizer and losses."""
+    loss_function = build_loss(config)
     optimizer_config = dict(config["optimizer"])
     optimizer_name = optimizer_config.pop("type")
     learning_rate = optimizer_config.pop("learning_rate")
@@ -112,6 +126,7 @@ def build_training_module(config: dict[str, Any]) -> DDPMModule:
         optimizer_name=optimizer_name,
         optimizer_kwargs=optimizer_config,
         validation_seed=config["run"]["seed"],
+        loss_function=loss_function,
     )
 
 
@@ -365,6 +380,7 @@ def load_experiment_checkpoint(
         optimizer_name=module.optimizer_name,
         optimizer_kwargs=module.optimizer_kwargs,
         validation_seed=module.validation_seed,
+        loss_function=module.loss_function,
         map_location=map_location,
     )
     loaded_module.to(map_location)

@@ -460,7 +460,7 @@ def show_loss_curves(runs, labels):
     if not ax.lines:
         plt.close(fig)
         return
-    ax.set(xlabel="Epoch", ylabel="Noise-prediction MSE", title="Training and validation loss")
+    ax.set(xlabel="Epoch", ylabel="Noise-prediction loss", title="Training and validation loss")
     ax.legend(fontsize="small")
     ax.grid(alpha=0.2)
     plt.show()

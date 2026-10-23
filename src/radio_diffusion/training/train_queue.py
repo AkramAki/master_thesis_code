@@ -1,7 +1,6 @@
 """Run experiment configs sequentially from a simple text queue."""
 
 import argparse
-import csv
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -21,17 +20,6 @@ from radio_diffusion.experiment import (
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-_SUMMARY_FIELDS = (
-    "index",
-    "config",
-    "status",
-    "started_at",
-    "finished_at",
-    "run_dir",
-    "best_checkpoint",
-    "last_checkpoint",
-    "error",
-)
 
 
 def read_queue(queue_path: str | Path) -> list[Path]:
@@ -103,14 +91,6 @@ def train_config(
     }
 
 
-def save_summary(summary_path: Path, records: list[dict[str, str]]) -> None:
-    """Write the queue's current status table to CSV."""
-    with summary_path.open("w", newline="", encoding="utf-8") as summary_file:
-        writer = csv.DictWriter(summary_file, fieldnames=_SUMMARY_FIELDS)
-        writer.writeheader()
-        writer.writerows(records)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Train experiment configs one at a time in queue-file order."
@@ -136,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     log_path = None
-    summary_path = None
     if not args.preflight:
         queue_file = args.queue_file.expanduser().resolve()
         queue_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S}_{uuid4().hex[:6]}"
@@ -144,7 +123,6 @@ def main(argv: list[str] | None = None) -> int:
         queue_dir.mkdir(parents=True, exist_ok=False)
         shutil.copy2(queue_file, queue_dir / "queue.txt")
         log_path = queue_dir / "queue.log"
-        summary_path = queue_dir / "summary.csv"
 
     def log(message: str) -> None:
         if log_path is not None:
@@ -167,16 +145,12 @@ def main(argv: list[str] | None = None) -> int:
         }
         for index, config_path in enumerate(config_paths, start=1)
     ]
-    if summary_path is not None:
-        save_summary(summary_path, records)
 
     total = len(config_paths)
     for index, config_path in enumerate(config_paths, start=1):
         record = records[index - 1]
         record["status"] = "running"
         record["started_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        if summary_path is not None:
-            save_summary(summary_path, records)
         mode = "PREFLIGHT" if args.preflight else "START"
         log(f"[{index}/{total}] {mode} {config_path}")
 
@@ -184,8 +158,6 @@ def main(argv: list[str] | None = None) -> int:
             record["run_dir"] = str(run_dir)
             record["best_checkpoint"] = str(run_dir / "checkpoints" / "best.ckpt")
             record["last_checkpoint"] = str(run_dir / "checkpoints" / "last.ckpt")
-            if summary_path is not None:
-                save_summary(summary_path, records)
 
         try:
             if args.preflight:
@@ -214,8 +186,6 @@ def main(argv: list[str] | None = None) -> int:
             log(f"[{index}/{total}] {label}; continuing to the next config: {config_path}")
 
         record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        if summary_path is not None:
-            save_summary(summary_path, records)
         if record["status"] == "completed":
             log(f"[{index}/{total}] COMPLETED {config_path}")
         elif record["status"] == "preflight_passed":
@@ -236,7 +206,6 @@ def main(argv: list[str] | None = None) -> int:
             log(f"Preflight finished: {total - len(failures)}/{total} configs passed, {len(failures)} failed.")
             return 1
         log(f"Queue finished: {total - len(failures)}/{total} succeeded, {len(failures)} failed.")
-        log(f"Queue report: {summary_path}")
         log(f"Queue log: {log_path}")
         return 1
 
@@ -245,7 +214,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     log(f"Queue finished successfully ({total}/{total} runs).")
-    log(f"Queue report: {summary_path}")
     log(f"Queue log: {log_path}")
     return 0
 

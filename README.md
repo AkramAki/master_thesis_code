@@ -40,6 +40,22 @@ noise, adjacent 4×4 generated-image grids, archived training samples and losses
 then reconstructions of validation images held out from both runs. Run it in
 the training environment with the saved outputs and dataset available.
 
+Training configs can combine noise-prediction losses by name:
+
+```toml
+[loss]
+loss = ["MSELoss", "L1Loss"]
+weights = [0.8, 0.2]
+```
+
+Supported losses are PyTorch's `MSELoss`, `L1Loss`, `SmoothL1Loss`, and
+`HuberLoss`, using their default settings. The lists must be nonempty and have
+matching lengths, with unique loss names and finite, nonnegative weights that
+sum to one (absolute tolerance `1e-6`). Weights are not automatically normalized.
+Configs without `[loss]` use `MSELoss` with weight `1.0`. Training logs contain
+each unweighted term and the weighted total, which remains `train_loss` /
+`val_loss` for checkpointing and early stopping.
+
 ## Setup
 
 The automated environment setup currently supports Linux only. Choose the
