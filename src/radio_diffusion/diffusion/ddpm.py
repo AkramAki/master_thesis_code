@@ -1,5 +1,7 @@
 """Gaussian forward diffusion for denoising diffusion models."""
 
+from typing import Callable
+
 import torch
 from torch import nn
 
@@ -218,8 +220,15 @@ class GaussianDiffusion(nn.Module):
         model: nn.Module,
         shape: tuple[int, int, int, int],
         device: torch.device | str | None = None,
+        *,
+        on_step: Callable[[int, torch.Tensor], None] | None = None,
     ) -> torch.Tensor:
-        """Generate images by repeatedly applying the learned reverse process."""
+        """Generate images by repeatedly applying the learned reverse process.
+
+        ``on_step(completed_steps, images)`` optionally observes the initial
+        noise (step zero) and each reverse step. Observers must not modify the
+        images. The return value remains the final image batch.
+        """
         if len(shape) != 4 or any(size < 1 for size in shape):
             raise ValueError(
                 "shape must contain four positive dimensions [B, C, H, W]."
@@ -236,8 +245,10 @@ class GaussianDiffusion(nn.Module):
         model.eval()
 
         try:
-            for timestep in tqdm(
-                reversed(range(self.num_steps)),
+            if on_step is not None:
+                on_step(0, images)
+            for completed_steps, timestep in tqdm(
+                enumerate(reversed(range(self.num_steps)), start=1),
                 total=self.num_steps,
                 desc="Sampling",
                 unit="step",
@@ -249,6 +260,8 @@ class GaussianDiffusion(nn.Module):
                     dtype=torch.long,
                 )
                 images = self.reverse_step(model, images, timesteps)
+                if on_step is not None:
+                    on_step(completed_steps, images)
         finally:
             model.train(was_training)
 

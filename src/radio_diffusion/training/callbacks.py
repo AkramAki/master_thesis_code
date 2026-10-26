@@ -1,15 +1,18 @@
 """Callbacks for reviewing generated samples during training."""
 
+from math import ceil
 from pathlib import Path
 
 import torch
 from lightning.pytorch import Callback, Trainer
 from lightning.pytorch import LightningModule
-from torchvision.utils import save_image
+from lightning.pytorch.loggers import MLFlowLogger
+
+from radio_diffusion.plotting import save_sample_grid
 
 
 class SampleGridCallback(Callback):
-    """Save fixed-seed DDPM samples as a grid and a raw tensor periodically."""
+    """Save fixed-seed final samples and intermediate reverse-sampling grids."""
 
     def __init__(
         self,
@@ -39,11 +42,25 @@ class SampleGridCallback(Callback):
         pl_module: LightningModule,
     ) -> None:
         epoch_number = trainer.current_epoch + 1
-        if epoch_number % self.every_n_epochs != 0 or not trainer.is_global_zero:
+        if (
+            trainer.sanity_checking
+            or epoch_number % self.every_n_epochs != 0
+            or not trainer.is_global_zero
+        ):
             return
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         device = pl_module.device
+        total_steps = pl_module.diffusion.num_steps
+        snapshot_steps = {
+            ceil(total_steps * fraction) for fraction in (0, 0.25, 0.5, 0.75)
+        }
+        snapshots = {}
+
+        def capture_snapshot(completed_steps: int, images: torch.Tensor) -> None:
+            if completed_steps in snapshot_steps and completed_steps < total_steps:
+                snapshots[completed_steps] = images.detach().cpu().clone()
+
         cuda_devices = (
             [
                 device.index
@@ -63,14 +80,43 @@ class SampleGridCallback(Callback):
                 model=pl_module.model,
                 shape=self.shape,
                 device=device,
+                on_step=capture_snapshot,
             )
 
         samples = samples.detach().cpu()
         filename = f"epoch={epoch_number:04d}-step={trainer.global_step:08d}"
         torch.save(samples, self.output_dir / f"{filename}.pt")
-        display_samples = ((samples + 1) / 2).clamp(0, 1)
-        save_image(
-            display_samples,
-            self.output_dir / f"{filename}.png",
+        final_path = self.output_dir / f"{filename}.png"
+        save_sample_grid(
+            samples,
+            final_path,
             nrow=self.nrow,
+            title=(
+                f"Epoch {epoch_number} — 100% sampling steps completed "
+                f"({total_steps}/{total_steps})"
+            ),
         )
+        grid_paths = [final_path]
+        progress_dir = self.output_dir / "denoising" / filename
+        for completed_steps, images in sorted(snapshots.items()):
+            percent = 100 * completed_steps / total_steps
+            path = progress_dir / f"sampling-step={completed_steps:05d}-of-{total_steps:05d}.png"
+            save_sample_grid(
+                images,
+                path,
+                nrow=self.nrow,
+                title=(
+                    f"Epoch {epoch_number} — {percent:g}% sampling steps completed "
+                    f"({completed_steps}/{total_steps})"
+                ),
+            )
+            grid_paths.append(path)
+
+        for logger in trainer.loggers:
+            if isinstance(logger, MLFlowLogger):
+                for path in grid_paths:
+                    relative_parent = path.parent.relative_to(self.output_dir)
+                    artifact_path = (Path("samples") / relative_parent).as_posix()
+                    logger.experiment.log_artifact(
+                        logger.run_id, str(path), artifact_path=artifact_path,
+                    )

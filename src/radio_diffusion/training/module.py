@@ -83,6 +83,7 @@ class DDPMModule(LightningModule):
                 on_step=stage == "train",
                 on_epoch=True,
                 batch_size=len(images),
+                sync_dist=True,
             )
 
         self.log(
@@ -92,6 +93,7 @@ class DDPMModule(LightningModule):
             on_epoch=True,
             prog_bar=True,
             batch_size=len(images),
+            sync_dist=True,
         )
         return loss
 

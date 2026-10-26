@@ -3,28 +3,50 @@
 import shutil
 import subprocess
 from pathlib import Path
+import re
 
 import torch
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, random_split
-from torchvision import transforms
 
 
 class MojaveDataset(Dataset):
-    def __init__(self, paths):
+    def __init__(self, paths, expected_image_shape=None):
         self.paths = paths
+        self.expected_image_shape = expected_image_shape
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, idx):
-        return torch.load(self.paths[idx], map_location="cpu").unsqueeze(0)
+        path = self.paths[idx]
+        image = torch.load(path, map_location="cpu", weights_only=True)
+        if (
+            not isinstance(image, torch.Tensor)
+            or image.ndim != 2
+            or not image.is_floating_point()
+            or any(size < 1 for size in image.shape)
+        ):
+            raise ValueError(
+                f"Expected a nonempty floating-point image shaped [height, width]: {path}"
+            )
+        image = image.unsqueeze(0)
+        if (
+            self.expected_image_shape is not None
+            and tuple(image.shape) != self.expected_image_shape
+        ):
+            raise ValueError(
+                f"Image {path} has shape {tuple(image.shape)}; expected "
+                f"{self.expected_image_shape} [channels, height, width]. "
+                "Check the dataset and samples.shape."
+            )
+        return image
 
 
 class MojaveDataModule(LightningDataModule):
     """Mojave data module for unconditional image generation.
 
-    Returns images with shape [B, C, W, H]
+    Returns images with shape [B, C, H, W].
 
     Args: 
         data_dir: Directory as Path or String containing the .icn.pt files created with preprocess_mojave.py.
@@ -35,6 +57,8 @@ class MojaveDataModule(LightningDataModule):
         test_fraction: Fraction of data used for testing.
         seed: Random seed for reproducible splitting.
         max_samples: Optional cap on images before train/validation/test splitting.
+        variant: Dataset/preprocessing identifier, without the image dimensions.
+        expected_image_shape: Optional [channels, height, width] from samples.shape.
     """
 
     def __init__(
@@ -47,6 +71,8 @@ class MojaveDataModule(LightningDataModule):
         seed: int = 42,
         remote_source: str | None = None,
         max_samples: int | None = None,
+        variant: str = "mojave_unspecified",
+        expected_image_shape: tuple[int, int, int] | None = None,
     ) -> None:
         super().__init__()
         if max_samples is not None and (
@@ -55,6 +81,23 @@ class MojaveDataModule(LightningDataModule):
             or max_samples < 1
         ):
             raise ValueError("max_samples must be a positive integer or None.")
+        if not isinstance(variant, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]*", variant
+        ):
+            raise ValueError(
+                "data.variant must start with a letter or digit and contain only "
+                "letters, digits, underscores, or hyphens."
+            )
+        if expected_image_shape is not None:
+            if len(expected_image_shape) != 3 or any(
+                isinstance(size, bool) or not isinstance(size, int) or size < 1
+                for size in expected_image_shape
+            ):
+                raise ValueError(
+                    "expected_image_shape must be [channels, height, width] "
+                    "with positive integer dimensions."
+                )
+            expected_image_shape = tuple(expected_image_shape)
 
         self.remote_source = remote_source
         configured_data_dir = Path(data_dir).expanduser()
@@ -69,6 +112,17 @@ class MojaveDataModule(LightningDataModule):
         self.test_fraction = test_fraction
         self.seed = seed
         self.max_samples = max_samples
+        self.variant = variant
+        self.expected_image_shape = expected_image_shape
+        self.image_shape: tuple[int, int, int] | None = None
+
+    @property
+    def experiment_name(self) -> str:
+        """Group runs by preprocessing and actual dimensions, after setup()."""
+        if self.image_shape is None:
+            raise RuntimeError("Call data.setup() before reading experiment_name.")
+        _, height, width = self.image_shape
+        return f"{self.variant}_{height}x{width}"
 
     @staticmethod
     def _local_path_for_remote_source(
@@ -128,6 +182,7 @@ class MojaveDataModule(LightningDataModule):
         return mean, std
 
     def setup(self, stage: str | None = None) -> None:
+        self.image_shape = None
         print(f"Mojave input directory: {self.data_dir}")
         if not self.data_dir.exists():
             print(f"Mojave input directory does not exist: {self.data_dir}")
@@ -156,6 +211,10 @@ class MojaveDataModule(LightningDataModule):
                 f"from {self.data_dir}."
             )
 
+        first_image = MojaveDataset(paths, self.expected_image_shape)[0]
+        self.image_shape = tuple(first_image.shape)
+        print(f"Dataset group: {self.experiment_name}")
+
         train, val, test = random_split(
             paths,
             [
@@ -167,13 +226,13 @@ class MojaveDataModule(LightningDataModule):
         )
 
         if stage in (None, "fit"):
-            self.train_dataset = MojaveDataset(train)
+            self.train_dataset = MojaveDataset(train, self.image_shape)
 
         if stage in (None, "fit", "validate"):
-            self.val_dataset = MojaveDataset(val)
+            self.val_dataset = MojaveDataset(val, self.image_shape)
 
         if stage in (None, "test"):
-            self.test_dataset = MojaveDataset(test)
+            self.test_dataset = MojaveDataset(test, self.image_shape)
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(

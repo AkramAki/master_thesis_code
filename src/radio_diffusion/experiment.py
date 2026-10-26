@@ -3,14 +3,18 @@
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime
+from importlib.util import find_spec
+import os
 from pathlib import Path
 import shutil
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.callbacks import Callback, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -20,6 +24,7 @@ from radio_diffusion.models.unet import UNet
 from radio_diffusion.training.callbacks import SampleGridCallback
 from radio_diffusion.training.losses import WeightedLoss
 from radio_diffusion.training.module import DDPMModule
+from radio_diffusion.training.tracking import MLflowTrackingCallback
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -53,12 +58,30 @@ class TrainerSettings:
         }
 
 
+@dataclass
+class TrackingSettings:
+    """Optional MLflow tracking; the endpoint is set through the environment."""
+
+    enabled: bool = False
+    study: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("tracking.enabled must be true or false.")
+        if self.study is not None and (
+            not isinstance(self.study, str) or not self.study.strip()
+        ):
+            raise ValueError("tracking.study must be a nonempty string when provided.")
+
+
 def load_config(path: str | Path) -> ExperimentConfig:
-    """Load a TOML experiment configuration and validate its losses."""
+    """Load a TOML experiment configuration and validate its training settings."""
     source_path = Path(path).expanduser().resolve()
     with source_path.open("rb") as config_file:
         config = ExperimentConfig(tomllib.load(config_file), source_path)
     build_loss(config)
+    get_sample_shape(config)
+    TrackingSettings(**config.get("tracking", {}))
     return config
 
 
@@ -86,6 +109,27 @@ def build_diffusion(config: dict[str, Any]) -> GaussianDiffusion:
     return GaussianDiffusion(**config["diffusion"])
 
 
+def get_sample_shape(config: dict[str, Any]) -> tuple[int, int, int, int]:
+    """Return the shared image shape used for sampling and dataset validation."""
+    channels = config["model"].get("in_channels", 1)
+    shape = config.get("samples", {}).get("shape", (4, channels, 256, 256))
+    if (
+        not isinstance(shape, (list, tuple))
+        or len(shape) != 4
+        or any(
+            isinstance(size, bool) or not isinstance(size, int) or size < 1
+            for size in shape
+        )
+    ):
+        raise ValueError(
+            "samples.shape must contain four positive integers "
+            "[batch, channels, height, width]."
+        )
+    if shape[1] != channels:
+        raise ValueError("samples.shape channels must match model.in_channels.")
+    return tuple(shape)
+
+
 def build_data_module(config: dict[str, Any]) -> MojaveDataModule:
     """Build the configured data module, resolving relative paths at repo root."""
     data_config = dict(config["data"])
@@ -98,6 +142,7 @@ def build_data_module(config: dict[str, Any]) -> MojaveDataModule:
         data_dir = _REPOSITORY_ROOT / data_dir
     data_config["data_dir"] = data_dir
     data_config.setdefault("seed", config["run"]["seed"])
+    data_config["expected_image_shape"] = get_sample_shape(config)[1:]
 
     return MojaveDataModule(**data_config)
 
@@ -222,13 +267,7 @@ def preflight_training(
     else:
         device_count = 1
 
-    model_config = config["model"]
-    sample_shape = config.get("samples", {}).get(
-        "shape", (4, model_config.get("in_channels", 1), 256, 256)
-    )
-    if len(sample_shape) != 4:
-        raise ValueError("samples.shape must be [batch, channels, height, width].")
-    image_shape = tuple(sample_shape[1:])
+    image_shape = get_sample_shape(config)[1:]
     per_device_batch = config["data"]["batch_size"]
     dataset = _SyntheticImageDataset(
         count=per_device_batch * device_count,
@@ -262,6 +301,17 @@ def build_trainer(
 ) -> Trainer:
     """Build a Trainer with checkpointing and configured review callbacks."""
     trainer_settings = TrainerSettings(**config.get("trainer", {}))
+    tracking_settings = TrackingSettings(**config.get("tracking", {}))
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+    if tracking_settings.enabled:
+        if find_spec("mlflow") is None:
+            raise ModuleNotFoundError(
+                "MLflow tracking is enabled but mlflow is not installed. "
+                "Run: python -m pip install -e '.[tracking]'"
+            )
+        endpoint = urlsplit(tracking_uri)
+        if endpoint.scheme not in ("http", "https") or not endpoint.netloc:
+            raise ValueError("MLFLOW_TRACKING_URI must be an HTTP(S) tracking server URL.")
     run_config = config["run"]
     output_root = Path(
         run_config.get("output_dir", f"outputs/{run_config['name']}")
@@ -281,8 +331,11 @@ def build_trainer(
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = output_root / f"{timestamp}_{uuid4().hex[:6]}"
-    run_dir.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(source_path, run_dir / "config.toml")
+    # DDP re-executes this builder in each worker. Only rank zero creates files;
+    # ModelCheckpoint broadcasts its directory when distributed setup completes.
+    if rank_zero_only.rank == 0:
+        run_dir.mkdir(parents=True, exist_ok=False)
+        shutil.copy2(source_path, run_dir / "config.toml")
 
     callbacks = [
         ModelCheckpoint(
@@ -299,7 +352,7 @@ def build_trainer(
 
     sample_config = config.get("samples", {})
     if sample_config.get("enabled", True):
-        shape = tuple(sample_config.get("shape", (4, 1, 256, 256)))
+        shape = get_sample_shape(config)
         callbacks.append(
             SampleGridCallback(
                 output_dir=run_dir / "samples",
@@ -318,6 +371,16 @@ def build_trainer(
                 mode="min",
                 patience=early_stopping_config.get("patience", 20),
                 min_delta=early_stopping_config.get("min_delta", 0.001),
+            )
+        )
+
+    if tracking_settings.enabled:
+        callbacks.append(
+            MLflowTrackingCallback(
+                config=config,
+                run_dir=run_dir,
+                tracking_uri=tracking_uri,
+                study=tracking_settings.study,
             )
         )
 

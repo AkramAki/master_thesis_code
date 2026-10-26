@@ -8,18 +8,17 @@ import csv
 from copy import deepcopy
 from dataclasses import dataclass
 from html import escape
-from math import isfinite
 from pathlib import Path
 import re
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import PowerNorm
 from matplotlib.ticker import MaxNLocator
 import torch
 from torchvision.utils import make_grid
 from tqdm.auto import tqdm
 
 from radio_diffusion.experiment import build_data_module, load_config
+from radio_diffusion.plotting import shared_intensity_norm as _shared_norm
 
 DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parents[2] / "outputs"
 
@@ -220,20 +219,6 @@ def common_validation_images(runs, *, count=4, seed=42):
     selected_paths = [paths[index] for index in indices]
     images = torch.stack([datasets[0][lookups[0][path]] for path in selected_paths])
     return images, selected_paths
-
-
-def _shared_norm(batches, gamma, limits=None):
-    """Use shared raw-intensity limits, either automatic or an explicit pair."""
-    if limits is None:
-        low = min(float(batch.min()) for batch in batches)
-        high = max(float(batch.max()) for batch in batches)
-        if high <= low:
-            high = low + 1
-    else:
-        low, high = limits
-        if not (isfinite(low) and isfinite(high) and low < high):
-            raise ValueError("limits must be two finite values with minimum < maximum.")
-    return PowerNorm(gamma=gamma, vmin=low, vmax=high)
 
 
 def _image_with_colorbar(figure, ax, image, gamma):

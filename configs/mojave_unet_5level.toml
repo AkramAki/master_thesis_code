@@ -3,6 +3,10 @@ name = "mojave_unet_5level"
 seed = 42
 output_dir = "outputs/mojave_unet_5level"
 
+[tracking]
+enabled = true
+study = "architecture_comparison"
+
 [trainer]
 max_epochs = 100
 accelerator = "gpu"
@@ -12,7 +16,7 @@ check_val_every_n_epoch = 1
 
 [samples]
 enabled = true
-shape = [2, 1, 256, 256]
+shape = [16, 1, 256, 256]
 every_n_epochs = 25
 nrow = 4
 
@@ -41,6 +45,7 @@ weight_decay = 0.0
 
 [data]
 type = "mojave"
+variant = "mojave_i_crop_v1"
 data_dir = "data/Mojave_I_256"
 remote_source = "nuradio:/cephfs/users/aaki/data/Mojave_I_256"
 batch_size = 32

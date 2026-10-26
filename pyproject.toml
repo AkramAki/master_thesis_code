@@ -12,7 +12,11 @@ dependencies = [
     "torch>=2.2",
     "torchvision>=0.17",
     "lightning>=2.2,<3",
+    "matplotlib>=3.7",
 ]
+
+[project.optional-dependencies]
+tracking = ["mlflow>=3.7,<4"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/radio_diffusion"]

@@ -9,6 +9,8 @@ import traceback
 from typing import Callable
 from uuid import uuid4
 
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
+
 from radio_diffusion.experiment import (
     build_data_module,
     build_trainer,
@@ -67,23 +69,28 @@ def train_config(
             f"\nEffective batch size across {devices} devices: "
             f"{batch_size * devices} (assuming distributed data parallel)"
         )
-    print(f"Model size:\n{model_summary}\n{batch_summary}", flush=True)
+    if rank_zero_only.rank == 0:
+        print(f"Model size:\n{model_summary}\n{batch_summary}", flush=True)
 
     data = build_data_module(config)
-    data.prepare_data()
+    # Trainer.fit() coordinates prepare_data() across distributed workers.
 
     trainer = build_trainer(config)
     run_dir = Path(trainer.checkpoint_callback.dirpath).parent
-    (run_dir / "model_summary.txt").write_text(
-        model_summary + "\n" + batch_summary + "\n", encoding="utf-8"
-    )
-    print(f"Run directory: {run_dir}", flush=True)
-    if on_run_created is not None:
-        on_run_created(run_dir)
+    if rank_zero_only.rank == 0:
+        (run_dir / "model_summary.txt").write_text(
+            model_summary + "\n" + batch_summary + "\n", encoding="utf-8"
+        )
+        print(f"Run directory: {run_dir}", flush=True)
+        if on_run_created is not None:
+            on_run_created(run_dir)
     trainer.fit(training_module, datamodule=data)
 
-    print(f"Best checkpoint: {trainer.checkpoint_callback.best_model_path}", flush=True)
-    print(f"Last checkpoint: {trainer.checkpoint_callback.last_model_path}", flush=True)
+    # ModelCheckpoint has now resolved the shared directory on every rank.
+    run_dir = Path(trainer.checkpoint_callback.dirpath).parent
+    if trainer.is_global_zero:
+        print(f"Best checkpoint: {trainer.checkpoint_callback.best_model_path}", flush=True)
+        print(f"Last checkpoint: {trainer.checkpoint_callback.last_model_path}", flush=True)
     return {
         "run_dir": str(run_dir),
         "best_checkpoint": trainer.checkpoint_callback.best_model_path,
@@ -116,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     log_path = None
-    if not args.preflight:
+    if not args.preflight and rank_zero_only.rank == 0:
         queue_file = args.queue_file.expanduser().resolve()
         queue_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S}_{uuid4().hex[:6]}"
         queue_dir = _REPOSITORY_ROOT / "outputs" / "queues" / queue_id
@@ -124,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         shutil.copy2(queue_file, queue_dir / "queue.txt")
         log_path = queue_dir / "queue.log"
 
+    @rank_zero_only
     def log(message: str) -> None:
         if log_path is not None:
             timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
