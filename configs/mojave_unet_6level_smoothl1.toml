@@ -1,0 +1,58 @@
+[run]
+name = "mojave_unet_6level_smoothl1"
+seed = 42
+output_dir = "outputs/mojave_unet_6level_smoothl1"
+
+[tracking]
+enabled = true
+study = "loss_comparison_6level"
+
+[trainer]
+max_epochs = 100
+accelerator = "gpu"
+devices = 3
+log_every_n_steps = 50
+check_val_every_n_epoch = 1
+
+[samples]
+enabled = true
+shape = [16, 1, 256, 256]
+every_n_epochs = 25
+nrow = 4
+
+[early_stopping]
+enabled = false
+patience = 20
+min_delta = 0.001
+
+[model]
+type = "unet"
+in_channels = 1
+channels = [32, 64, 128, 256, 512, 512]
+blocks_per_level = [1, 1, 1, 1, 1, 0]
+time_embedding_dim = 128
+num_groups = 8
+
+[diffusion]
+num_steps = 1000
+beta_start = 0.0001
+beta_end = 0.02
+
+[loss]
+loss = ["SmoothL1Loss"]
+weights = [1.0]
+
+[optimizer]
+type = "Adam"
+learning_rate = 0.001
+weight_decay = 0.0
+
+[data]
+type = "mojave"
+variant = "mojave_i_crop_v1"
+data_dir = "data/Mojave_I_256"
+remote_source = "nuradio:/cephfs/users/aaki/data/Mojave_I_256"
+batch_size = 32
+num_workers = 32
+val_fraction = 0.1
+test_fraction = 0.1

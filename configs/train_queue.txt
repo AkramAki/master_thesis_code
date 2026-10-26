@@ -7,3 +7,16 @@ mojave_unet_5level.toml
 mojave_unet_residual.toml
 mojave_unet_attention.toml
 mojave_unet_multiscale_attention.toml
+
+# Six-level U-Net: same model and Adam settings, different noise-prediction losses.
+mojave_unet_6level.toml
+mojave_unet_6level_l1.toml
+mojave_unet_6level_smoothl1.toml
+mojave_unet_6level_mse_l1.toml
+
+# Existing architectures: AdamW with weight decay 0.01 and the default MSE loss.
+mojave_unet_4level_adamw.toml
+mojave_unet_5level_adamw.toml
+mojave_unet_residual_adamw.toml
+mojave_unet_attention_adamw.toml
+mojave_unet_multiscale_attention_adamw.toml
