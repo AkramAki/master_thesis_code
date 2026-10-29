@@ -2,11 +2,11 @@
 # Paths are relative to this file. Lines starting with # are comments.
 # From the repository root, run: python -m radio_diffusion.training.train_queue configs/train_queue.txt
 # Check one training step per config on the configured GPUs first with: python -m radio_diffusion.training.train_queue configs/train_queue.txt --preflight
-mojave_unet_4level.toml
-mojave_unet_5level.toml
-mojave_unet_residual.toml
-mojave_unet_attention.toml
-mojave_unet_multiscale_attention.toml
+# mojave_unet_4level.toml
+# mojave_unet_5level.toml
+# mojave_unet_residual.toml
+# mojave_unet_attention.toml
+# mojave_unet_multiscale_attention.toml
 
 # Six-level U-Net: same model and Adam settings, different noise-prediction losses.
 mojave_unet_6level.toml

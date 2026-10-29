@@ -1,7 +1,7 @@
 [run]
 name = "mojave_unet_4level_adamw"
 seed = 42
-output_dir = "outputs/mojave_unet_4level_adamw"
+output_dir = "/cephfs/users/aaki/radio_diffusion_models/mojave_256/mojave_unet_4level_adamw"
 
 [tracking]
 enabled = true
