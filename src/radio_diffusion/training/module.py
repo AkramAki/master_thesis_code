@@ -44,7 +44,8 @@ class DDPMModule(LightningModule):
         noisy_images: torch.Tensor,
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
-        return self.model(noisy_images, timesteps)
+        model = torch.compile(self.model)
+        return model(noisy_images, timesteps)
 
     def _shared_step(
         self,
