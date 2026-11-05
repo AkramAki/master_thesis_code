@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from radio_diffusion.data.mojave import MojaveDataModule
 from radio_diffusion.diffusion.ddpm import GaussianDiffusion
+from radio_diffusion.models.dit import DiT
 from radio_diffusion.models.unet import UNet
 from radio_diffusion.training.callbacks import SampleGridCallback
 from radio_diffusion.training.losses import WeightedLoss
@@ -90,18 +91,20 @@ def seed_experiment(config: dict[str, Any]) -> None:
     seed_everything(config["run"]["seed"], workers=True)
 
 
-def build_model(config: dict[str, Any]) -> UNet:
+def build_model(config: dict[str, Any]) -> torch.nn.Module:
     """Build the configured noise-prediction model."""
     model_config = dict(config["model"])
     model_type = model_config.pop("type")
-    if model_type != "unet":
-        raise ValueError(f"Unsupported model type: {model_type}")
 
-    for key in ("channels", "blocks_per_level", "attention_levels"):
-        if key in model_config:
-            model_config[key] = tuple(model_config[key])
+    if model_type == "unet":
+        for key in ("channels", "blocks_per_level", "attention_levels"):
+            if key in model_config:
+                model_config[key] = tuple(model_config[key])
+        return UNet(**model_config)
+    if model_type == "dit":
+        return DiT(**model_config)
 
-    return UNet(**model_config)
+    raise ValueError(f"Unsupported model type: {model_type}")
 
 
 def build_diffusion(config: dict[str, Any]) -> GaussianDiffusion:
