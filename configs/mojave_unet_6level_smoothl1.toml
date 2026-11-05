@@ -28,7 +28,7 @@ min_delta = 0.001
 [model]
 type = "unet"
 in_channels = 1
-channels = [32, 64, 128, 256, 512, 512]
+channels = [32, 64, 128, 256, 512, 1024]
 blocks_per_level = [1, 1, 1, 1, 1, 0]
 time_embedding_dim = 128
 num_groups = 8

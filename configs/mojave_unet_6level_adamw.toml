@@ -1,11 +1,11 @@
 [run]
-name = "mojave_unet_multiscale_attention_adamw"
+name = "mojave_unet_6level"
 seed = 42
-output_dir = "/cephfs/users/aaki/radio_diffusion_models/mojave_256/mojave_unet_multiscale_attention_adamw"
+output_dir = "/cephfs/users/aaki/radio_diffusion_models/mojave_256/mojave_unet_6level"
 
 [tracking]
 enabled = true
-study = "optimizer_comparison"
+study = "loss_comparison_6level"
 
 [trainer]
 max_epochs = 100
@@ -28,22 +28,24 @@ min_delta = 0.001
 [model]
 type = "unet"
 in_channels = 1
-channels = [32, 64, 128, 256, 512]
-blocks_per_level = [2, 2, 2, 1, 0]
+channels = [32, 64, 128, 256, 512, 1024]
+blocks_per_level = [1, 1, 1, 1, 1, 0]
 time_embedding_dim = 128
 num_groups = 8
-attention_levels = [3, 4]
-attention_heads = 8
 
 [diffusion]
 num_steps = 1000
 beta_start = 0.0001
 beta_end = 0.02
 
+[loss]
+loss = ["MSELoss"]
+weights = [1.0]
+
 [optimizer]
 type = "AdamW"
 learning_rate = 0.001
-weight_decay = 0.01
+weight_decay = 0.0
 
 [data]
 type = "mojave"

@@ -28,7 +28,7 @@ min_delta = 0.001
 [model]
 type = "unet"
 in_channels = 1
-channels = [32, 64, 128, 256, 512, 512]
+channels = [32, 64, 128, 256, 512, 1024]
 blocks_per_level = [1, 1, 1, 1, 1, 0]
 time_embedding_dim = 128
 num_groups = 8
@@ -40,7 +40,7 @@ beta_end = 0.02
 
 [loss]
 loss = ["MSELoss", "L1Loss"]
-weights = [0.8, 0.2]
+weights = [0.7, 0.3]
 
 [optimizer]
 type = "Adam"
