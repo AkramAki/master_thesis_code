@@ -30,6 +30,7 @@ class DDPMModule(LightningModule):
             raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
         self.model = model
+        self._train_forward = self.model
         self.diffusion = diffusion
         self.learning_rate = learning_rate
         self.optimizer_name = optimizer_name
@@ -39,13 +40,16 @@ class DDPMModule(LightningModule):
             loss_function if loss_function is not None else WeightedLoss(["MSELoss"], [1.0])
         )
 
-    def forward(
-        self,
-        noisy_images: torch.Tensor,
-        timesteps: torch.Tensor,
-    ) -> torch.Tensor:
-        model = torch.compile(self.model)
-        return model(noisy_images, timesteps)
+    def setup(self, stage: str) -> None:
+        if stage == "fit":
+            object.__setattr__(self, "_train_forward", torch.compile(self.model))
+
+    # def forward(
+    #     self,
+    #     noisy_images: torch.Tensor,
+    #     timesteps: torch.Tensor,
+    # ) -> torch.Tensor:
+    #     return self.compiled_model(noisy_images, timesteps)
 
     def _shared_step(
         self,
@@ -74,7 +78,7 @@ class DDPMModule(LightningModule):
         noisy_images, noise = self.diffusion.add_noise(
             images, timesteps, noise=noise
         )
-        predicted_noise = self(noisy_images, timesteps)
+        predicted_noise = self._train_forward(noisy_images, timesteps)
         loss, loss_terms = self.loss_function.compute(predicted_noise, noise)
 
         for name, term in loss_terms.items():
