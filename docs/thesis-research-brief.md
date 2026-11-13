@@ -10,8 +10,9 @@ The planned path is `MOJAVE FITS → image preprocessing → diffusion generator
 
 ### Will do
 
-- [ ] Inspect FITS units and beam information ([NRAO restored-image notes](https://science.nrao.edu/facilities/vla/data-processing/end-to-end-recipes/continuum)).
-- [ ] Make MOJAVE preprocessing retain more metadata ([Astropy FITS guide](https://docs.astropy.org/en/stable/io/fits/)).
+- [x] Inspect FITS units and beam information ([NRAO restored-image notes](https://science.nrao.edu/facilities/vla/data-processing/end-to-end-recipes/continuum)). [Fits definition](https://www.aips.nrao.edu/TEXT/PUBL/AIPSMEM117.PDF)
+- [x] Make MOJAVE preprocessing retain more metadata ([Astropy FITS guide](https://docs.astropy.org/en/stable/io/fits/)).
+- [ ] Related to above: Retain beam meta data as well as some compactnes value
 - [ ] Investigate how the existing beam can be diminished before pyvisgen ([conditional diffusion reconstruction from dirty images](https://doi.org/10.1051/0004-6361/202347948)).
 - [ ] Decide how to assess generated images, including possible flux measurements ([RadioNets evaluation](https://www.aanda.org/articles/aa/full_html/2023/08/aa47073-23/aa47073-23.html); [radio-galaxy diffusion study](https://doi.org/10.1051/0004-6361/202451429)).
 - [ ] Test flux control with a flux penalty after the image units are established ([related radio-galaxy flux-control study; it uses conditioning](https://doi.org/10.1051/0004-6361/202451429)).
