@@ -28,11 +28,16 @@ def save_sample_grid(
     *,
     nrow: int = 4,
     title: str = "Generated samples",
+    sample_labels: list[str] | None = None,
+    row_labels: list[str] | None = None,
+    column_labels: list[str] | None = None,
 ) -> None:
     """Save a grayscale grid using the review plots' gamma and inferno colormap.
 
     One raw-intensity colorbar serves the whole grid. Each saved grid has its
     own automatic limits; the model output and saved tensors are unchanged.
+    Final grids can label each sample; trajectory grids can label examples by
+    row and denoising stages by column.
     """
     images = images.detach().float().cpu()
     if images.ndim != 4 or images.shape[1] != 1 or len(images) == 0:
@@ -42,7 +47,17 @@ def save_sample_grid(
 
     columns = min(nrow, len(images))
     rows = (len(images) + columns - 1) // columns
-    figure = Figure(figsize=(2.5 * columns + 1, 2.5 * rows + 0.5), layout="constrained")
+    if sample_labels is not None and len(sample_labels) != len(images):
+        raise ValueError("sample_labels must contain one label per image.")
+    if row_labels is not None and len(row_labels) != rows:
+        raise ValueError("row_labels must contain one label per grid row.")
+    if column_labels is not None and len(column_labels) != columns:
+        raise ValueError("column_labels must contain one label per grid column.")
+    label_width = 2.5 if row_labels is not None else 0
+    figure = Figure(
+        figsize=(2.5 * columns + 1 + label_width, 2.5 * rows + 0.5),
+        layout="constrained",
+    )
     axes = figure.subplots(rows, columns, squeeze=False)
     norm = shared_intensity_norm([images])
     for index, ax in enumerate(axes.flat):
@@ -55,7 +70,19 @@ def save_sample_grid(
         )
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_title(f"Sample {index + 1}", fontsize=9)
+        row, column = divmod(index, columns)
+        if sample_labels is not None:
+            ax.set_title(sample_labels[index], fontsize=8)
+        elif column_labels is not None:
+            if row == 0:
+                ax.set_title(column_labels[column], fontsize=9)
+        elif row_labels is None:
+            ax.set_title(f"Sample {index + 1}", fontsize=9)
+        if row_labels is not None and column == 0:
+            ax.set_ylabel(
+                row_labels[row], rotation=0, ha="right", va="center",
+                labelpad=12, fontsize=8,
+            )
     figure.suptitle(title)
     figure.colorbar(artist, ax=list(axes.flat), shrink=0.8, label="Raw intensity")
     path = Path(path)

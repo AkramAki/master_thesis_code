@@ -11,15 +11,20 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from radio_diffusion.paths import get_path, load_env
+
+load_env()
+
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.callbacks import Callback, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
-from lightning.pytorch.utilities.rank_zero import rank_zero_only
+from lightning.pytorch.utilities.rank_zero import rank_zero_only, rank_zero_warn
 import torch
 from torch.utils.data import DataLoader, Dataset
 
 from radio_diffusion.data.mojave import MojaveDataModule
 from radio_diffusion.diffusion.ddpm import GaussianDiffusion
+from radio_diffusion.models.conditioned_dit import ConditionedDiT
 from radio_diffusion.models.dit import DiT
 from radio_diffusion.models.unet import UNet
 from radio_diffusion.training.callbacks import SampleGridCallback
@@ -82,6 +87,8 @@ def load_config(path: str | Path) -> ExperimentConfig:
         config = ExperimentConfig(tomllib.load(config_file), source_path)
     build_loss(config)
     get_sample_shape(config)
+    get_conditioning_params(config)
+    get_conditioning_settings(config)
     TrackingSettings(**config.get("tracking", {}))
     return config
 
@@ -93,8 +100,12 @@ def seed_experiment(config: dict[str, Any]) -> None:
 
 def build_model(config: dict[str, Any]) -> torch.nn.Module:
     """Build the configured noise-prediction model."""
+    conditioning_params = get_conditioning_params(config)
+    conditioning_settings = get_conditioning_settings(config)
     model_config = dict(config["model"])
     model_type = model_config.pop("type")
+    model_config.pop("conditioning_params", None)
+    model_config.pop("conditioning_settings", None)
 
     if model_type == "unet":
         for key in ("channels", "blocks_per_level", "attention_levels"):
@@ -103,6 +114,11 @@ def build_model(config: dict[str, Any]) -> torch.nn.Module:
         return UNet(**model_config)
     if model_type == "dit":
         return DiT(**model_config)
+    if model_type == "conditioned_dit":
+        return ConditionedDiT(
+            conditioning_params=conditioning_params, **conditioning_settings,
+            **model_config,
+        )
 
     raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -113,9 +129,13 @@ def build_diffusion(config: dict[str, Any]) -> GaussianDiffusion:
 
 
 def get_sample_shape(config: dict[str, Any]) -> tuple[int, int, int, int]:
-    """Return the shared image shape used for sampling and dataset validation."""
+    """Build the sample batch from data dimensions and the requested count.
+
+    Older configs can still supply samples.shape for the count and dimensions.
+    """
     channels = config["model"].get("in_channels", 1)
-    shape = config.get("samples", {}).get("shape", (4, channels, 256, 256))
+    sample_config = config.get("samples", {})
+    shape = sample_config.get("shape", (4, channels, 256, 256))
     if (
         not isinstance(shape, (list, tuple))
         or len(shape) != 4
@@ -130,22 +150,79 @@ def get_sample_shape(config: dict[str, Any]) -> tuple[int, int, int, int]:
         )
     if shape[1] != channels:
         raise ValueError("samples.shape channels must match model.in_channels.")
-    return tuple(shape)
+
+    num_samples = sample_config.get("num_samples", shape[0])
+    if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
+        raise ValueError("samples.num_samples must be a positive integer.")
+
+    data_config = config.get("data", {})
+    if "image_size" in data_config:
+        image_size = data_config["image_size"]
+        if isinstance(image_size, bool) or not isinstance(image_size, int) or image_size < 1:
+            raise ValueError("data.image_size must be a positive integer.")
+        return (num_samples, channels, image_size, image_size)
+    return (num_samples, *shape[1:])
+
+
+def get_conditioning_params(config: dict[str, Any]) -> list[str]:
+    """Return supported metadata fields, reporting selections that are omitted."""
+    fields = config["model"].get("conditioning_params", [])
+    if not isinstance(fields, list) or any(
+        not isinstance(field, str) or not field.strip() for field in fields
+    ):
+        raise ValueError(
+            "model.conditioning_params must be a list of nonempty field names."
+        )
+    if len(fields) != len(set(fields)):
+        raise ValueError("model.conditioning_params must contain unique field names.")
+    model_type = config["model"]["type"]
+    if fields and model_type != "conditioned_dit":
+        rank_zero_warn(
+            f"Model type {model_type!r} does not support conditioning; "
+            f"omitting conditioning_params: {', '.join(fields)}. "
+            "The data module will return images only.",
+            stacklevel=1,
+        )
+        return []
+    return list(fields)
+
+
+def get_conditioning_settings(config: dict[str, Any]) -> dict[str, bool]:
+    """Validate optional mask encoding settings for conditional models."""
+    settings = config["model"].get("conditioning_settings", {})
+    if not isinstance(settings, dict) or set(settings) - {"use_validity_masks"}:
+        raise ValueError(
+            "model.conditioning_settings supports only use_validity_masks."
+        )
+    use_masks = settings.get("use_validity_masks", False)
+    if not isinstance(use_masks, bool):
+        raise ValueError("model.conditioning_settings.use_validity_masks must be boolean.")
+    if config["model"]["type"] != "conditioned_dit":
+        if use_masks:
+            rank_zero_warn(
+                "Omitting conditioning_settings.use_validity_masks because "
+                f"model type {config['model']['type']!r} does not support conditioning.",
+                stacklevel=1,
+            )
+        return {}
+    return {"use_validity_masks": use_masks}
 
 
 def build_data_module(config: dict[str, Any]) -> MojaveDataModule:
-    """Build the configured data module, resolving relative paths at repo root."""
+    """Build the data module, using .env paths unless data_dir is explicit."""
     data_config = dict(config["data"])
     data_type = data_config.pop("type")
     if data_type != "mojave":
         raise ValueError(f"Unsupported data module type: {data_type}")
 
-    data_dir = Path(data_config["data_dir"]).expanduser()
-    if not data_dir.is_absolute():
-        data_dir = _REPOSITORY_ROOT / data_dir
-    data_config["data_dir"] = data_dir
+    if data_config.get("data_dir") is not None:
+        data_dir = Path(data_config["data_dir"]).expanduser()
+        if not data_dir.is_absolute():
+            data_dir = _REPOSITORY_ROOT / data_dir
+        data_config["data_dir"] = data_dir
     data_config.setdefault("seed", config["run"]["seed"])
     data_config["expected_image_shape"] = get_sample_shape(config)[1:]
+    data_config["metadata_fields"] = get_conditioning_params(config)
 
     return MojaveDataModule(**data_config)
 
@@ -205,16 +282,29 @@ def format_model_size_summary(model: torch.nn.Module) -> str:
 class _SyntheticImageDataset(Dataset):
     """Small CPU dataset used to check a configured per-device batch."""
 
-    def __init__(self, count: int, image_shape: tuple[int, ...]) -> None:
+    def __init__(
+        self,
+        count: int,
+        image_shape: tuple[int, ...],
+        conditioning_params: list[str] | None = None,
+    ) -> None:
         self.count = count
         self.image_shape = image_shape
+        self.conditioning_params = tuple(conditioning_params or ())
 
     def __len__(self) -> int:
         return self.count
 
-    def __getitem__(self, index: int) -> torch.Tensor:
+    def __getitem__(self, index: int) -> torch.Tensor | dict[str, Any]:
         del index
-        return torch.zeros(self.image_shape)
+        image = torch.zeros(self.image_shape)
+        if not self.conditioning_params:
+            return image
+        return {
+            "image": image,
+            "metadata": {field: torch.tensor(0.0) for field in self.conditioning_params},
+            "metadata_mask": {field: True for field in self.conditioning_params},
+        }
 
 
 class _PreflightMemoryCallback(Callback):
@@ -275,6 +365,7 @@ def preflight_training(
     dataset = _SyntheticImageDataset(
         count=per_device_batch * device_count,
         image_shape=image_shape,
+        conditioning_params=get_conditioning_params(config),
     )
     dataloader = DataLoader(dataset, batch_size=per_device_batch, num_workers=0)
 
@@ -316,11 +407,13 @@ def build_trainer(
         if endpoint.scheme not in ("http", "https") or not endpoint.netloc:
             raise ValueError("MLFLOW_TRACKING_URI must be an HTTP(S) tracking server URL.")
     run_config = config["run"]
-    output_root = Path(
-        run_config.get("output_dir", f"outputs/{run_config['name']}")
-    ).expanduser()
-    if not output_root.is_absolute():
-        output_root = _REPOSITORY_ROOT / output_root
+    height, width = get_sample_shape(config)[2:]
+    image_size = str(height) if height == width else f"{height}x{width}"
+    output_root = (
+        get_path("OUTPUT_ROOT")
+        / f"{config['data']['type']}_{image_size}"
+        / run_config["name"]
+    )
 
     source_path = config_path or getattr(config, "source_path", None)
     if source_path is None:
@@ -339,6 +432,12 @@ def build_trainer(
     if rank_zero_only.rank == 0:
         run_dir.mkdir(parents=True, exist_ok=False)
         shutil.copy2(source_path, run_dir / "config.toml")
+        print(
+            f"Run directory: {run_dir}\n"
+            f"Checkpoints: {run_dir / 'checkpoints'}\n"
+            f"CSV metrics: {run_dir / 'logs'}",
+            flush=True,
+        )
 
     callbacks = [
         ModelCheckpoint(
@@ -363,6 +462,10 @@ def build_trainer(
                 every_n_epochs=sample_config.get("every_n_epochs", 10),
                 seed=sample_config.get("seed", run_config["seed"]),
                 nrow=sample_config.get("nrow", 4),
+                save_final_grid=sample_config.get("save_final_grid", True),
+                save_denoising_grids=sample_config.get("save_denoising_grids", True),
+                conditioning_params=get_conditioning_params(config),
+                conditioning=sample_config.get("conditioning"),
             )
         )
 

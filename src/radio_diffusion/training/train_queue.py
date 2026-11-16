@@ -3,11 +3,14 @@
 import argparse
 from datetime import datetime
 from pathlib import Path
-import shutil
 import sys
+from time import monotonic
 import traceback
 from typing import Callable
-from uuid import uuid4
+
+from radio_diffusion.paths import load_env
+
+load_env()
 
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 
@@ -20,9 +23,6 @@ from radio_diffusion.experiment import (
     preflight_training,
     seed_experiment,
 )
-
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-
 
 def read_queue(queue_path: str | Path) -> list[Path]:
     """Read ordered config paths, relative to the queue file's directory."""
@@ -81,7 +81,6 @@ def train_config(
         (run_dir / "model_summary.txt").write_text(
             model_summary + "\n" + batch_summary + "\n", encoding="utf-8"
         )
-        print(f"Run directory: {run_dir}", flush=True)
         if on_run_created is not None:
             on_run_created(run_dir)
     trainer.fit(training_module, datamodule=data)
@@ -122,22 +121,10 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
-    log_path = None
-    if not args.preflight and rank_zero_only.rank == 0:
-        queue_file = args.queue_file.expanduser().resolve()
-        queue_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S}_{uuid4().hex[:6]}"
-        queue_dir = _REPOSITORY_ROOT / "outputs" / "queues" / queue_id
-        queue_dir.mkdir(parents=True, exist_ok=False)
-        shutil.copy2(queue_file, queue_dir / "queue.txt")
-        log_path = queue_dir / "queue.log"
-
     @rank_zero_only
     def log(message: str) -> None:
-        if log_path is not None:
-            timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-            with log_path.open("a", encoding="utf-8") as log_file:
-                log_file.write(f"{timestamp} {message}\n")
-        print(message, flush=True)
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        print(f"[{timestamp}] {message}", flush=True)
 
     records = [
         {
@@ -150,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             "best_checkpoint": "",
             "last_checkpoint": "",
             "error": "",
+            "elapsed": "",
         }
         for index, config_path in enumerate(config_paths, start=1)
     ]
@@ -157,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     total = len(config_paths)
     for index, config_path in enumerate(config_paths, start=1):
         record = records[index - 1]
+        started = monotonic()
         record["status"] = "running"
         record["started_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         mode = "PREFLIGHT" if args.preflight else "START"
@@ -194,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
             log(f"[{index}/{total}] {label}; continuing to the next config: {config_path}")
 
         record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        record["elapsed"] = f"{monotonic() - started:.1f}s"
         if record["status"] == "completed":
             log(f"[{index}/{total}] COMPLETED {config_path}")
         elif record["status"] == "preflight_passed":
@@ -201,20 +191,20 @@ def main(argv: list[str] | None = None) -> int:
 
     failure_status = "preflight_failed" if args.preflight else "failed"
     failures = [record for record in records if record["status"] == failure_status]
-    if args.preflight:
-        log("\nPreflight report")
-        for record in records:
-            status = "PASS" if record["status"] == "preflight_passed" else "FAIL"
-            log(f"{record['index']}. {Path(record['config']).name}: {status}")
-            if record["error"]:
-                log(f"   {record['error']}")
+    log("Preflight report" if args.preflight else "Queue report")
+    for record in records:
+        status = "PASS" if record["status"] in ("completed", "preflight_passed") else "FAIL"
+        log(f"{record['index']}. {Path(record['config']).name}: {status} ({record['elapsed']})")
+        if record["run_dir"]:
+            log(f"   Run directory: {record['run_dir']}")
+        if record["error"]:
+            log(f"   {record['error']}")
 
     if failures:
         if args.preflight:
             log(f"Preflight finished: {total - len(failures)}/{total} configs passed, {len(failures)} failed.")
             return 1
         log(f"Queue finished: {total - len(failures)}/{total} succeeded, {len(failures)} failed.")
-        log(f"Queue log: {log_path}")
         return 1
 
     if args.preflight:
@@ -222,7 +212,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     log(f"Queue finished successfully ({total}/{total} runs).")
-    log(f"Queue log: {log_path}")
     return 0
 
 

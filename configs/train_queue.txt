@@ -1,30 +1,12 @@
 # Add one experiment TOML file per line, in the order to train them.
 # Paths are relative to this file. Lines starting with # are comments.
-# From the repository root, run: python -m radio_diffusion.training.train_queue configs/train_queue.txt
-# Check one training step per config on the configured GPUs first with: python -m radio_diffusion.training.train_queue configs/train_queue.txt --preflight
-unet/mojave_unet_4level.toml
-unet/mojave_unet_5level.toml
-unet/mojave_unet_6level.toml
 
-unet/mojave_unet_residual.toml
-unet/mojave_unet_attention.toml
-unet/mojave_unet_multiscale_attention.toml
+# From the repository root, run: 
+# TORCHINDUCTOR_COMPILE_THREADS=1 \ 
+# python -m radio_diffusion.training.train_queue configs/train_queue.txt
 
-# Six-level U-Net: same model and Adam settings, different noise-prediction losses.
-unet/mojave_unet_6level_l1.toml
-unet/mojave_unet_6level_smoothl1.toml
-unet/mojave_unet_6level_mse_l1.toml
+# Check one training step per config on the configured GPUs first with: 
+# TORCHINDUCTOR_COMPILE_THREADS=1 \
+# python -m radio_diffusion.training.train_queue configs/train_queue.txt 
 
-# Existing architectures: AdamW with weight decay 0.01 and the default MSE loss.
-unet/mojave_unet_4level_adamw.toml
-unet/mojave_unet_5level_adamw.toml
-unet/mojave_unet_6level_adamw.toml
-
-# DiT pixel-space runs with varied patch sizes and model capacities.
-dit/mojave_dit_pixel_256.toml
-dit/mojave_dit_pixel_256_patch8.toml
-dit/mojave_dit_pixel_256_wide.toml
-dit/mojave_dit_pixel_256_deep.toml
-dit/mojave_dit_pixel_256_target_20gb.toml
-dit/mojave_dit_pixel_256_large.toml
-dit/mojave_dit_pixel_256_target_75gb.toml
+experiment.toml

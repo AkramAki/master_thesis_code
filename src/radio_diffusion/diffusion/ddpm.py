@@ -4,6 +4,7 @@ from typing import Callable
 
 import torch
 from torch import nn
+from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
 from tqdm.auto import tqdm
 
@@ -176,6 +177,10 @@ class GaussianDiffusion(nn.Module):
         model: nn.Module,
         noisy_images: torch.Tensor,
         timesteps: torch.Tensor,
+        *,
+        metadata: dict[str, torch.Tensor] | None = None,
+        metadata_mask: dict[str, torch.Tensor] | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Predict and sample the images at the preceding diffusion step."""
         if noisy_images.ndim != 4 or not noisy_images.is_floating_point():
@@ -191,7 +196,18 @@ class GaussianDiffusion(nn.Module):
         if ((timesteps < 0) | (timesteps >= self.num_steps)).any():
             raise ValueError("timesteps must be between 0 and num_steps - 1.")
 
-        predicted_noise = model(noisy_images, timesteps)
+        conditioning = {}
+        if getattr(model, "supports_conditioning", False):
+            conditioning["metadata"] = metadata
+            if getattr(model, "use_validity_masks", False):
+                conditioning["metadata_mask"] = metadata_mask
+        elif metadata or metadata_mask:
+            rank_zero_warn(
+                f"{type(model).__name__} does not support conditioning; "
+                "omitting supplied sampling metadata.",
+                stacklevel=1,
+            )
+        predicted_noise = model(noisy_images, timesteps, **conditioning)
         if predicted_noise.shape != noisy_images.shape:
             raise ValueError(
                 "model output must have the same shape as noisy_images.")
@@ -210,7 +226,12 @@ class GaussianDiffusion(nn.Module):
 
         model_mean = mean_scale * \
             (noisy_images - noise_scale * predicted_noise)
-        random_noise = torch.randn_like(noisy_images)
+        random_noise = torch.randn(
+            noisy_images.shape,
+            device=noisy_images.device,
+            dtype=noisy_images.dtype,
+            generator=generator,
+        )
         nonzero_mask = (timesteps != 0).to(noisy_images).view(-1, 1, 1, 1)
         return model_mean + nonzero_mask * variance.sqrt() * random_noise
 
@@ -222,12 +243,19 @@ class GaussianDiffusion(nn.Module):
         device: torch.device | str | None = None,
         *,
         on_step: Callable[[int, torch.Tensor], None] | None = None,
+        metadata: dict[str, torch.Tensor] | None = None,
+        metadata_mask: dict[str, torch.Tensor] | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Generate images by repeatedly applying the learned reverse process.
 
         ``on_step(completed_steps, images)`` optionally observes the initial
         noise (step zero) and each reverse step. Observers must not modify the
-        images. The return value remains the final image batch.
+        images. The return value remains the final image batch. Metadata values
+        are batched scalars shaped [B] or [B, 1] and remain fixed throughout
+        denoising. Explicit finite values receive true validity masks when the
+        model uses masks and no masks were supplied. A local generator controls
+        both the initial noise and all reverse-step noise.
         """
         if len(shape) != 4 or any(size < 1 for size in shape):
             raise ValueError(
@@ -240,7 +268,65 @@ class GaussianDiffusion(nn.Module):
                 raise ValueError(
                     "model must have parameters or device must be provided.") from exc
 
-        images = torch.randn(shape, device=device)
+        device = torch.device(device)
+        if not getattr(model, "supports_conditioning", False):
+            if metadata or metadata_mask:
+                rank_zero_warn(
+                    f"{type(model).__name__} does not support conditioning; "
+                    "omitting supplied sampling metadata.",
+                    stacklevel=1,
+                )
+            metadata = metadata_mask = None
+        else:
+            fields = tuple(getattr(model, "conditioning_params", ()))
+            metadata = {} if metadata is None else dict(metadata)
+            if set(metadata) != set(fields):
+                raise ValueError(
+                    "Sampling metadata must contain exactly the configured fields: "
+                    + ", ".join(fields)
+                )
+            for field, value in metadata.items():
+                if (
+                    not isinstance(value, torch.Tensor)
+                    or value.is_complex()
+                    or tuple(value.shape) not in ((shape[0],), (shape[0], 1))
+                    or not bool(torch.isfinite(value).all())
+                ):
+                    raise ValueError(
+                        f"Sampling metadata {field!r} must contain finite numerical "
+                        "scalars or booleans shaped [B] or [B, 1]."
+                    )
+                metadata[field] = value.to(device=device)
+            if getattr(model, "use_validity_masks", False):
+                if metadata_mask is None:
+                    metadata_mask = {
+                        field: torch.ones_like(value, dtype=torch.bool)
+                        for field, value in metadata.items()
+                    }
+                elif set(metadata_mask) != set(fields):
+                    raise ValueError("Sampling validity masks must match the configured fields.")
+                masks = {}
+                for field, valid in metadata_mask.items():
+                    if (
+                        not isinstance(valid, torch.Tensor)
+                        or valid.dtype != torch.bool
+                        or tuple(valid.shape) not in ((shape[0],), (shape[0], 1))
+                    ):
+                        raise ValueError(
+                            f"Sampling validity mask {field!r} must be boolean "
+                            "and shaped [B] or [B, 1]."
+                        )
+                    masks[field] = valid.to(device=device)
+                metadata_mask = masks
+            else:
+                if metadata_mask:
+                    rank_zero_warn(
+                        "Sampling validity masks omitted because use_validity_masks is false.",
+                        stacklevel=1,
+                    )
+                metadata_mask = None
+
+        images = torch.randn(shape, device=device, generator=generator)
         was_training = model.training
         model.eval()
 
@@ -259,7 +345,10 @@ class GaussianDiffusion(nn.Module):
                     device=device,
                     dtype=torch.long,
                 )
-                images = self.reverse_step(model, images, timesteps)
+                images = self.reverse_step(
+                    model, images, timesteps,
+                    metadata=metadata, metadata_mask=metadata_mask, generator=generator,
+                )
                 if on_step is not None:
                     on_step(completed_steps, images)
         finally:

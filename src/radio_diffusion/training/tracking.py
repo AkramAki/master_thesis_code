@@ -103,6 +103,7 @@ class MLflowTrackingCallback(Callback):
             return
 
         resolved = deepcopy(self.config)
+        resolved["run"]["output_dir"] = str(self.run_dir.parent)
         resolved["data"].update(
             variant=data.variant,
             data_dir=str(data.data_dir),

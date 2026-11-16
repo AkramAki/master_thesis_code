@@ -1,18 +1,34 @@
 """Callbacks for reviewing generated samples during training."""
 
-from math import ceil
+import json
 from pathlib import Path
+from typing import Any
 
 import torch
 from lightning.pytorch import Callback, Trainer
 from lightning.pytorch import LightningModule
 from lightning.pytorch.loggers import MLFlowLogger
+from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
 from radio_diffusion.plotting import save_sample_grid
 
 
+_CONDITIONING_LABELS = {
+    "noise_rms_jy_per_beam": "Noise RMS (Jy/beam)",
+    "peak_brightness_jy_per_beam": "Peak (Jy/beam)",
+    "jet_pa_deg": "Jet PA (deg)",
+    "jet_radial_extent_mas": "Jet extent (mas)",
+    "ridgeline_arc_clipped": "Ridge arc clipped",
+}
+
+
 class SampleGridCallback(Callback):
-    """Save fixed-seed final samples and intermediate reverse-sampling grids."""
+    """Save fixed-seed final grids and four-example denoising trajectories.
+
+    Conditioning is either explicit scalar/list values or seeded complete rows
+    drawn once from the training split. Every artifact uses the same generated
+    batch. Local generators preserve the training RNG state.
+    """
 
     def __init__(
         self,
@@ -21,6 +37,10 @@ class SampleGridCallback(Callback):
         every_n_epochs: int = 10,
         seed: int = 42,
         nrow: int = 4,
+        save_final_grid: bool = True,
+        save_denoising_grids: bool = True,
+        conditioning_params: list[str] | None = None,
+        conditioning: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         if len(shape) != 4 or any(size < 1 for size in shape):
@@ -29,12 +49,120 @@ class SampleGridCallback(Callback):
             raise ValueError("every_n_epochs must be positive.")
         if nrow < 1:
             raise ValueError("nrow must be positive.")
+        if not isinstance(save_final_grid, bool) or not isinstance(save_denoising_grids, bool):
+            raise ValueError("Sample grid switches must be true or false.")
+        if conditioning is not None and not isinstance(conditioning, dict):
+            raise ValueError("samples.conditioning must be a table.")
 
         self.output_dir = Path(output_dir)
         self.shape = shape
         self.every_n_epochs = every_n_epochs
         self.seed = seed
         self.nrow = nrow
+        self.save_final_grid = save_final_grid
+        self.save_denoising_grids = save_denoising_grids
+        self.conditioning_params = tuple(conditioning_params or ())
+        settings = dict(conditioning or {})
+        self.conditioning_mode = settings.pop("mode", "manual")
+        if self.conditioning_mode not in ("manual", "auto"):
+            raise ValueError("samples.conditioning.mode must be 'manual' or 'auto'.")
+        self.conditioning_seed = settings.pop("seed", seed)
+        if isinstance(self.conditioning_seed, bool) or not isinstance(self.conditioning_seed, int):
+            raise ValueError("samples.conditioning.seed must be an integer.")
+        if not self.conditioning_params:
+            if conditioning:
+                rank_zero_warn(
+                    "Omitting samples.conditioning because no model conditioning fields are active.",
+                    stacklevel=1,
+                )
+            self.conditioning_mode = "unconditional"
+            settings = {}
+        elif self.conditioning_mode == "auto" and settings:
+            raise ValueError("Automatic sample conditioning does not accept manual field values.")
+        elif self.conditioning_mode == "manual" and (
+            self.save_final_grid or self.save_denoising_grids
+        ):
+            if set(settings) != set(self.conditioning_params):
+                raise ValueError(
+                    "Manual samples.conditioning must supply exactly these fields: "
+                    + ", ".join(self.conditioning_params)
+                )
+        self.conditioning_values = settings
+        self._conditioning_batch: dict | None = None
+
+    def _prepare_conditioning(self, trainer: Trainer) -> None:
+        if self._conditioning_batch is not None:
+            return
+        if self.conditioning_mode == "auto":
+            data = trainer.datamodule
+            if data is None or not hasattr(data, "sample_conditioning"):
+                raise ValueError("Automatic sample conditioning requires a training data module.")
+            self._conditioning_batch = data.sample_conditioning(
+                self.shape[0], self.conditioning_seed
+            )
+            return
+
+        metadata = {}
+        for field, configured in self.conditioning_values.items():
+            try:
+                value = torch.as_tensor(configured)
+            except (TypeError, ValueError, RuntimeError) as error:
+                raise ValueError(
+                    f"Sample conditioning {field!r} must be numerical or boolean."
+                ) from error
+            if value.ndim == 0:
+                value = value.expand(self.shape[0]).clone()
+            if value.is_complex() or tuple(value.shape) != (self.shape[0],):
+                raise ValueError(
+                    f"Sample conditioning {field!r} must be a scalar or a list "
+                    f"of exactly {self.shape[0]} values."
+                )
+            if not torch.isfinite(value).all():
+                raise ValueError(f"Sample conditioning {field!r} must contain finite values.")
+            metadata[field] = value
+        self._conditioning_batch = {
+            "metadata": metadata,
+            "metadata_mask": {
+                field: torch.ones(self.shape[0], dtype=torch.bool) for field in metadata
+            },
+            "source_observations": [None] * self.shape[0],
+        }
+
+    def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        del pl_module
+        if trainer.is_global_zero and (self.save_final_grid or self.save_denoising_grids):
+            self._prepare_conditioning(trainer)
+
+    def _sample_records(self) -> list[dict]:
+        batch = self._conditioning_batch
+        return [
+            {
+                "sample_id": f"S{index + 1:02d}",
+                "conditioning": {
+                    field: value[index].item() for field, value in batch["metadata"].items()
+                },
+                "validity": {
+                    field: bool(value[index])
+                    for field, value in batch["metadata_mask"].items()
+                },
+                "source_observation": batch["source_observations"][index],
+            }
+            for index in range(self.shape[0])
+        ]
+
+    @staticmethod
+    def _sample_labels(records: list[dict]) -> list[str]:
+        labels = []
+        for record in records:
+            lines = [record["sample_id"]]
+            for field, value in record["conditioning"].items():
+                name = _CONDITIONING_LABELS.get(field, field)
+                formatted = str(value) if isinstance(value, bool) else f"{value:.4g}"
+                if not record["validity"][field]:
+                    formatted = f"missing → {formatted}"
+                lines.append(f"{name}: {formatted}")
+            labels.append("\n".join(lines))
+        return labels
 
     def on_validation_epoch_end(
         self,
@@ -46,72 +174,98 @@ class SampleGridCallback(Callback):
             trainer.sanity_checking
             or epoch_number % self.every_n_epochs != 0
             or not trainer.is_global_zero
+            or not (self.save_final_grid or self.save_denoising_grids)
         ):
             return
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         device = pl_module.device
         total_steps = pl_module.diffusion.num_steps
-        snapshot_steps = {
-            ceil(total_steps * fraction) for fraction in (0, 0.25, 0.5, 0.75)
-        }
+        stage_steps = [round(total_steps * index / 3) for index in range(4)]
         snapshots = {}
+        self._prepare_conditioning(trainer)
+        batch = self._conditioning_batch
 
         def capture_snapshot(completed_steps: int, images: torch.Tensor) -> None:
-            if completed_steps in snapshot_steps and completed_steps < total_steps:
+            if completed_steps in stage_steps:
                 snapshots[completed_steps] = images.detach().cpu().clone()
 
-        cuda_devices = (
-            [
-                device.index
-                if device.index is not None
-                else torch.cuda.current_device()
-            ]
-            if device.type == "cuda"
-            else []
+        use_masks = getattr(pl_module.model, "use_validity_masks", False)
+        samples = pl_module.diffusion.sample(
+            model=pl_module.model,
+            shape=self.shape,
+            device=device,
+            metadata=batch["metadata"] or None,
+            metadata_mask=(batch["metadata_mask"] if use_masks else None),
+            generator=torch.Generator(device=device).manual_seed(self.seed),
+            on_step=capture_snapshot if self.save_denoising_grids else None,
         )
-        # Sampling uses torch's RNG; restore the training RNG after using the
-        # same initial latent noise at every preview interval.
-        with torch.random.fork_rng(devices=cuda_devices):
-            torch.random.default_generator.manual_seed(self.seed)
-            for cuda_device in cuda_devices:
-                torch.cuda.default_generators[cuda_device].manual_seed(self.seed)
-            samples = pl_module.diffusion.sample(
-                model=pl_module.model,
-                shape=self.shape,
-                device=device,
-                on_step=capture_snapshot,
-            )
 
         samples = samples.detach().cpu()
         filename = f"epoch={epoch_number:04d}-step={trainer.global_step:08d}"
         torch.save(samples, self.output_dir / f"{filename}.pt")
-        final_path = self.output_dir / f"{filename}.png"
-        save_sample_grid(
-            samples,
-            final_path,
-            nrow=self.nrow,
-            title=(
-                f"Epoch {epoch_number} — 100% sampling steps completed "
-                f"({total_steps}/{total_steps})"
-            ),
+        records = self._sample_records()
+        sample_labels = self._sample_labels(records)
+        conditioning_title = (
+            "Unconditional" if not self.conditioning_params
+            else f"Conditioning: {self.conditioning_mode}; validity masks: "
+            + ("on" if use_masks else "off")
         )
-        grid_paths = [final_path]
-        progress_dir = self.output_dir / "denoising" / filename
-        for completed_steps, images in sorted(snapshots.items()):
-            percent = 100 * completed_steps / total_steps
-            path = progress_dir / f"sampling-step={completed_steps:05d}-of-{total_steps:05d}.png"
+        manifest_path = self.output_dir / f"{filename}.json"
+        manifest = {
+            "epoch": epoch_number,
+            "global_step": trainer.global_step,
+            "noise_seed": self.seed,
+            "conditioning_mode": self.conditioning_mode,
+            "conditioning_seed": self.conditioning_seed,
+            "use_validity_masks": use_masks,
+            "total_diffusion_steps": total_steps,
+            "denoising_completed_steps": stage_steps if self.save_denoising_grids else [],
+            "eligible_observations": batch.get("eligible_observations"),
+            "with_replacement": batch.get("with_replacement", False),
+            "samples": records,
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n")
+        grid_paths = [manifest_path]
+        if self.save_final_grid:
+            final_path = self.output_dir / f"{filename}.png"
             save_sample_grid(
-                images,
-                path,
-                nrow=self.nrow,
-                title=(
-                    f"Epoch {epoch_number} — {percent:g}% sampling steps completed "
-                    f"({completed_steps}/{total_steps})"
-                ),
+                samples, final_path, nrow=self.nrow,
+                title=f"Epoch {epoch_number} — final samples\n{conditioning_title}",
+                sample_labels=sample_labels,
             )
-            grid_paths.append(path)
+            grid_paths.append(final_path)
+        progress_dir = self.output_dir / "denoising" / filename
+        if self.save_denoising_grids:
+            column_labels = [
+                (
+                    "Initial noise" if step == 0 else "Final" if step == total_steps
+                    else f"{total_steps - step} noise steps remaining"
+                ) + f"\n{step}/{total_steps} reverse steps"
+                for step in stage_steps
+            ]
+            for start in range(0, self.shape[0], 4):
+                stop = min(start + 4, self.shape[0])
+                trajectory = torch.stack(
+                    [snapshots[step][start:stop] for step in stage_steps], dim=1
+                )
+                path = progress_dir / f"samples={start + 1:02d}-{stop:02d}.png"
+                save_sample_grid(
+                    trajectory.flatten(0, 1), path, nrow=4,
+                    title=(
+                        f"Epoch {epoch_number} — samples {start + 1}–{stop} denoising\n"
+                        f"{conditioning_title}"
+                    ),
+                    row_labels=sample_labels[start:stop],
+                    column_labels=column_labels,
+                )
+                grid_paths.append(path)
 
+        print(
+            f"Saved {self.shape[0]} samples for epoch {epoch_number}: {self.output_dir}\n"
+            f"Final grid: {self.save_final_grid}; denoising grids: {self.save_denoising_grids}",
+            flush=True,
+        )
         for logger in trainer.loggers:
             if isinstance(logger, MLFlowLogger):
                 for path in grid_paths:

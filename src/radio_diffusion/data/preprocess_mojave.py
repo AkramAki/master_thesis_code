@@ -7,6 +7,15 @@ from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 
+from radio_diffusion.paths import (
+    get_mojave_data_dir,
+    get_path,
+    get_preprocess_cpu_cores,
+    load_env,
+)
+
+load_env()
+
 import torch
 import numpy as np
 from astropy import units as u
@@ -442,23 +451,32 @@ def process_observation(
 
 @timelogger
 def preprocess_data(
-    input_dir: str,
-    uv_dir: str,
+    input_dir: str | None = None,
+    uv_dir: str | None = None,
     img_size: int = 256,
-    cpu_cores: int = 1,
+    cpu_cores: int | None = None,
     output_dir: str | None = None,
 ) -> None:
+    if cpu_cores is None:
+        cpu_cores = get_preprocess_cpu_cores()
     if img_size < 1 or cpu_cores < 1:
         raise ValueError("Image size and CPU worker count must be positive.")
 
+    input_dir = get_path("MOJAVE_FITS_DIR") if input_dir is None else Path(input_dir).expanduser()
+    uv_dir = get_path("MOJAVE_UV_DIR") if uv_dir is None else Path(uv_dir).expanduser()
+    output_dir = (
+        get_mojave_data_dir(img_size)
+        if output_dir is None else Path(output_dir).expanduser()
+    )
+    print(
+        f"MOJAVE preprocessing\nFITS directory: {input_dir}\nUV directory: {uv_dir}\n"
+        f"Output directory: {output_dir}\nImage size: {img_size}; CPU cores: {cpu_cores}",
+        flush=True,
+    )
     observations = list(iter_observations(input_dir, uv_dir))
     if not observations:
         raise FileNotFoundError(f"No FITS files found in {input_dir}")
 
-    output_dir = (
-        Path(output_dir) if output_dir is not None
-        else Path(f"/cephfs/users/aaki/data/Mojave_I_{img_size}")
-    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     process_image = partial(
@@ -509,17 +527,17 @@ def preprocess_data(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--input_dir", default="/cephfs/projects/RADIO/mojave_archive/intensities_fits",
+        "--input_dir", default=None, help="FITS directory; defaults to MOJAVE_FITS_DIR in .env.",
     )
     parser.add_argument(
-        "--uv_dir", default="/cephfs/projects/RADIO/mojave_archive/uv-files",
+        "--uv_dir", default=None, help="UV directory; defaults to MOJAVE_UV_DIR in .env.",
     )
-    parser.add_argument("--output_dir", default=None)
+    parser.add_argument("--output_dir", default=None, help="Defaults to MOJAVE_DATA_ROOT/Mojave_I_<image_size>.")
     parser.add_argument("--image_size", type=int, default=256)
-    parser.add_argument("--cpu_cores", type=int, default=1)
+    parser.add_argument("--cpu_cores", type=int, default=None, help="Defaults to MOJAVE_PREPROCESS_CPUS in .env.")
     args = parser.parse_args()
 
-    if args.image_size < 1 or args.cpu_cores < 1:
+    if args.image_size < 1 or (args.cpu_cores is not None and args.cpu_cores < 1):
         parser.error("--image_size and --cpu_cores must be positive.")
 
     preprocess_data(

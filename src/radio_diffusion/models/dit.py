@@ -195,6 +195,20 @@ class DiT(nn.Module):
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
         """Predict noise for images shaped ``[B, C, H, W]`` and timesteps ``[B]``."""
+        return self._forward_with_tokens(noisy_images, timesteps)
+
+    def _forward_with_tokens(
+        self,
+        noisy_images: torch.Tensor,
+        timesteps: torch.Tensor,
+        conditioning_tokens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Process optional extra tokens jointly with the image patch tokens.
+
+        Conditioning tokens are already encoded as [B, N, hidden_size]. Only
+        image tokens are projected back to pixels. Conditional wrappers own
+        their metadata encoding and call this shared pipeline.
+        """
         if (
             noisy_images.ndim != 4
             or not noisy_images.is_floating_point()
@@ -213,6 +227,21 @@ class DiT(nn.Module):
             raise ValueError(
                 "image height and width must be divisible by patch_size."
             )
+        if conditioning_tokens is not None:
+            if (
+                conditioning_tokens.ndim != 3
+                or not conditioning_tokens.is_floating_point()
+                or conditioning_tokens.shape[0] != noisy_images.shape[0]
+                or conditioning_tokens.shape[2] != self.hidden_size
+            ):
+                raise ValueError(
+                    "conditioning_tokens must be floating-point and shaped "
+                    "[B, N, hidden_size]."
+                )
+            if conditioning_tokens.device != noisy_images.device:
+                raise ValueError(
+                    "conditioning_tokens and noisy_images must be on the same device."
+                )
 
         hidden = self.patch_embedding(noisy_images)
         batch_size, _, grid_height, grid_width = hidden.shape
@@ -224,6 +253,11 @@ class DiT(nn.Module):
             noisy_images.device,
         )
         tokens = tokens + position_embedding.to(dtype=tokens.dtype)[None, :, :]
+        image_token_count = tokens.shape[1]
+        if conditioning_tokens is not None:
+            tokens = torch.cat(
+                (tokens, conditioning_tokens.to(dtype=tokens.dtype)), dim=1
+            )
 
         condition = self.time_embedding(
             _sinusoidal_embedding(timesteps, self.hidden_size).to(dtype=tokens.dtype)
@@ -231,6 +265,7 @@ class DiT(nn.Module):
         for block in self.blocks:
             tokens = block(tokens, condition)
 
+        tokens = tokens[:, :image_token_count]
         shift, scale = self.final_modulation(condition).chunk(2, dim=-1)
         tokens = self.final_norm(tokens) * (1 + scale[:, None]) + shift[:, None]
         patch_predictions = self.output_projection(tokens)
