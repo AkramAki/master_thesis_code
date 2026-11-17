@@ -1,6 +1,8 @@
 """Preprocess Mojave images and save crops with metadata."""
 
 import argparse
+import warnings
+from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import nullcontext
@@ -20,22 +22,20 @@ import torch
 import numpy as np
 from astropy import units as u
 from astropy.io import fits
-from astropy.wcs import WCS
+from astropy.io.fits.verify import VerifyWarning
+from astropy.wcs import FITSFixedWarning, WCS
 from scipy.interpolate import CubicSpline
 from scipy.ndimage import map_coordinates
 from torchvision.transforms.functional import center_crop
 from tqdm import tqdm
 
 from radio_diffusion.utils.timing import timelogger
-import warnings
-from astropy.wcs import FITSFixedWarning
 
-# Ignore FITSFixedWarning
-warnings.filterwarnings('ignore', category=FITSFixedWarning)
+IGNORED_WARNING_CATEGORIES = (FITSFixedWarning, VerifyWarning)
 
 NOISE_METHOD = "four_corner"  # "header" or "four_corner".
 JET_ORIENTATION_SETTINGS = {
-    "inner_mas": 1.0,
+    "inner_mas": 0.2,
     "outer_mas": 3.0,
     "sigma_cut": 3.0,
 }
@@ -454,6 +454,35 @@ def process_observation(
     torch.save(sample, output_dir / output_name)
 
 
+def _process_observation_with_warning_counts(
+    observation: tuple[Path, Path | None],
+    img_size: int,
+    output_dir: Path,
+) -> tuple[Counter[str], str | None]:
+    """Suppress and count selected warnings, including when processing fails."""
+    warning_counts = Counter()
+    error_message = None
+    with warnings.catch_warnings():
+        showwarning = warnings.showwarning
+
+        def count_warning(message, category, filename, lineno, file=None, line=None):
+            for ignored_category in IGNORED_WARNING_CATEGORIES:
+                if issubclass(category, ignored_category):
+                    warning_counts[ignored_category.__name__] += 1
+                    return
+            showwarning(message, category, filename, lineno, file=file, line=line)
+
+        for category in IGNORED_WARNING_CATEGORIES:
+            warnings.simplefilter("always", category=category)
+        warnings.showwarning = count_warning
+        try:
+            process_observation(observation, img_size=img_size, output_dir=output_dir)
+        except Exception as error:
+            error_message = f"{type(error).__name__}: {error}"
+
+    return warning_counts, error_message
+
+
 @timelogger
 def preprocess_data(
     input_dir: str | None = None,
@@ -475,7 +504,9 @@ def preprocess_data(
     )
     print(
         f"MOJAVE preprocessing\nFITS directory: {input_dir}\nUV directory: {uv_dir}\n"
-        f"Output directory: {output_dir}\nImage size: {img_size}; CPU cores: {cpu_cores}",
+        f"Output directory: {output_dir}\nImage size: {img_size}; CPU cores: {cpu_cores}\n"
+        "Ignoring warnings (occurrences will be counted): "
+        + ", ".join(category.__name__ for category in IGNORED_WARNING_CATEGORIES),
         flush=True,
     )
     observations = list(iter_observations(input_dir, uv_dir))
@@ -485,7 +516,7 @@ def preprocess_data(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     process_image = partial(
-        process_observation,
+        _process_observation_with_warning_counts,
         img_size=img_size,
         output_dir=output_dir,
     )
@@ -493,6 +524,7 @@ def preprocess_data(
     missing_uv = [image.name for image, uv in observations if uv is None]
     processed_count = 0
     failures = []
+    warning_counts = Counter()
     with ProcessPoolExecutor(
         max_workers=cpu_cores,
         initializer=torch.set_num_threads,
@@ -507,17 +539,24 @@ def preprocess_data(
         for future in as_completed(futures):
             image_path = futures[future]
             try:
-                future.result()
+                counts, error_message = future.result()
             except Exception as error:
                 failures.append((image_path.name, f"{type(error).__name__}: {error}"))
             else:
-                processed_count += 1
+                warning_counts.update(counts)
+                if error_message is None:
+                    processed_count += 1
+                else:
+                    failures.append((image_path.name, error_message))
             progress.update(1)
 
     print(f"\nImages found: {len(observations)}")
     print(f"Images processed and saved: {processed_count}")
     print(f"Images without matching UV files: {len(missing_uv)}")
     print(f"Processing failures: {len(failures)}")
+    print("Ignored warnings:")
+    for category in IGNORED_WARNING_CATEGORIES:
+        print(f"  {category.__name__}: {warning_counts[category.__name__]}")
     if missing_uv:
         print("Images without matching UV files:")
         for filename in missing_uv:
@@ -526,7 +565,15 @@ def preprocess_data(
         print("Failed images:")
         for filename, error in sorted(failures):
             print(f"  {filename}: {error}")
-        raise RuntimeError(f"Preprocessing failed for {len(failures)} images; see report above.")
+        if processed_count == 0:
+            raise RuntimeError(
+                f"Preprocessing failed for all {len(failures)} images; "
+                "no images were saved. See report above."
+            )
+    print(
+        f"Completed: {processed_count} images saved; "
+        f"{len(failures)} observations failed."
+    )
 
 
 def main() -> None:
@@ -545,8 +592,6 @@ def main() -> None:
     if args.image_size < 1 or (args.cpu_cores is not None and args.cpu_cores < 1):
         parser.error("--image_size and --cpu_cores must be positive.")
     
-    print("Preprocessing is ignoring the following warning if it appears: \n fitsfixedwarning datfix made the change")
-
     preprocess_data(
         args.input_dir,
         args.uv_dir,
