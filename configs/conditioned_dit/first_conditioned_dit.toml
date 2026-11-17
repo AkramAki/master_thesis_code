@@ -34,14 +34,6 @@ num_heads = 10
 mlp_ratio = 4.0
 conditioning_params = ["jet_pa_deg", "jet_radial_extent_mas", "peak_brightness_jy_per_beam", "noise_rms_jy_per_beam"]
 
-type = "dit"
-in_channels = 1
-patch_size = 16
-hidden_size = 384
-depth = 24
-num_heads = 6
-mlp_ratio = 4.0
-
 [model.conditioning_settings]
 use_validity_masks = true
 
