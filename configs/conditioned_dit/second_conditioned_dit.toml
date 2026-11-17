@@ -1,0 +1,79 @@
+[run]
+name = "experiment"
+seed = 42
+
+[tracking]
+enabled = true
+study = "conditioning"
+
+[trainer]
+max_epochs = 200
+accelerator = "gpu"
+devices = 4
+log_every_n_steps = 50
+check_val_every_n_epoch = 1
+
+[data]
+# Data directory: MOJAVE_DATA_ROOT/Mojave_I_<image_size>, resolved through .env.
+type = "mojave"
+image_size = 256
+batch_size = 16
+num_workers = 10
+val_fraction = 0.1
+test_fraction = 0.1
+seed = 42
+
+[model]
+type = "conditioned_dit"
+in_channels = 1
+out_channels = 1
+patch_size = 16
+hidden_size = 768
+depth = 20
+num_heads = 10
+mlp_ratio = 4.0
+
+type = "dit"
+in_channels = 1
+patch_size = 16
+hidden_size = 384
+depth = 24
+num_heads = 6
+mlp_ratio = 4.0
+
+[model.conditioning_settings]
+use_validity_masks = true
+
+[diffusion]
+num_steps = 1000
+beta_start = 0.0001
+beta_end = 0.02
+
+[loss]
+loss = ["MSELoss"]
+weights = [1.0]
+
+[optimizer]
+type = "AdamW"
+learning_rate = 0.0001
+weight_decay = 0.0
+betas = [0.9, 0.999]
+eps = 0.00000001
+amsgrad = false
+
+[samples]
+enabled = true
+num_samples = 16
+every_n_epochs = 10
+seed = 42
+nrow = 4
+save_final_grid = true
+save_denoising_grids = true
+
+[samples.conditioning]
+mode = "auto"
+
+[early_stopping]
+enabled = false
+patience = 20
+min_delta = 0.0

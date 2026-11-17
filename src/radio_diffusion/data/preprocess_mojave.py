@@ -28,10 +28,10 @@ from tqdm import tqdm
 
 from radio_diffusion.utils.timing import timelogger
 
-NOISE_METHOD = "header"  # "header" or "four_corner".
+NOISE_METHOD = "four_corner"  # "header" or "four_corner".
 JET_ORIENTATION_SETTINGS = {
-    "inner_mas": 0.15,
-    "outer_mas": 1.0,
+    "inner_mas": 1.0,
+    "outer_mas": 3.0,
     "sigma_cut": 3.0,
 }
 RIDGELINE_SETTINGS = {

@@ -51,43 +51,6 @@ configured devices. It does not load the real dataset or create MLflow runs.
 Each training run saves its config, checkpoints, metrics, and periodic samples
 under its configured output directory.
 
-`samples.shape[0]` controls the number of preview images; `nrow` controls the
-grid columns. Each preview saves the final raw tensor and PNG, plus grids at
-0%, 25%, 50%, and 75% of reverse sampling steps completed. These fractions
-describe steps, not a measured fraction of noise removed. Intermediate grids
-live under `samples/denoising/` and come from the same sampling pass.
-Grids use the review plots' raw-intensity scaling (`inferno`, gamma `0.5`),
-with an automatic range and labeled colorbar per grid.
-
-## Configuration
-
-Losses combine by name and weight:
-
-```toml
-[loss]
-loss = ["MSELoss", "L1Loss"]
-weights = [0.8, 0.2]
-```
-
-Supported losses are `MSELoss`, `L1Loss`, `SmoothL1Loss`, and `HuberLoss`.
-Names must be unique; weights must be finite, nonnegative, and sum to one
-(tolerance `1e-6`). Omitting `[loss]` selects MSE with weight `1.0`.
-
-Dataset identity includes preprocessing and image dimensions:
-
-```toml
-[data]
-variant = "mojave_i_crop_v1"
-
-[samples]
-shape = [2, 1, 256, 256]
-```
-
-`variant` identifies the image kind and preprocessing version. Loaded grayscale
-image tensors must match the channels, height, and width in `samples.shape`.
-The experiment group combines the variant and verified dimensions, for example
-`mojave_i_crop_v1_256x256`. Older configs default to `mojave_unspecified`.
-
 ## MLflow
 
 The tracking dependency is optional:
