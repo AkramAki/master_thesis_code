@@ -27,6 +27,11 @@ from torchvision.transforms.functional import center_crop
 from tqdm import tqdm
 
 from radio_diffusion.utils.timing import timelogger
+import warnings
+from astropy.wcs import FITSFixedWarning
+
+# Ignore FITSFixedWarning
+warnings.filterwarnings('ignore', category=FITSFixedWarning)
 
 NOISE_METHOD = "four_corner"  # "header" or "four_corner".
 JET_ORIENTATION_SETTINGS = {
@@ -539,6 +544,8 @@ def main() -> None:
 
     if args.image_size < 1 or (args.cpu_cores is not None and args.cpu_cores < 1):
         parser.error("--image_size and --cpu_cores must be positive.")
+    
+    print("Preprocessing is ignoring the following warning if it appears: \n fitsfixedwarning datfix made the change")
 
     preprocess_data(
         args.input_dir,
