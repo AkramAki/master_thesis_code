@@ -1,5 +1,5 @@
 [run]
-name = "experiment"
+name = "second_conditioned_dit"
 seed = 42
 
 [tracking]
