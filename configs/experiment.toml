@@ -65,8 +65,3 @@ save_denoising_grids = true
 
 [samples.conditioning]
 mode = "auto"
-
-[early_stopping]
-enabled = false
-patience = 20
-min_delta = 0.0

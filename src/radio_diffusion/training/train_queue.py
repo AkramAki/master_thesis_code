@@ -1,4 +1,4 @@
-"""Run experiment configs sequentially from a simple text queue."""
+"""Run queued experiment configs through preflight or normal training."""
 
 import argparse
 from datetime import datetime
@@ -6,7 +6,6 @@ from pathlib import Path
 import sys
 from time import monotonic
 import traceback
-from typing import Callable
 
 from radio_diffusion.paths import load_env
 
@@ -14,18 +13,13 @@ load_env()
 
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 
-from radio_diffusion.experiment import (
-    build_data_module,
-    build_trainer,
-    build_training_module,
-    format_model_size_summary,
-    load_config,
-    preflight_training,
-    seed_experiment,
-)
+from radio_diffusion.load_config import load_config
+from radio_diffusion.training.preflight import run_config_preflight
+from radio_diffusion.training.train import run_training
+
 
 def read_queue(queue_path: str | Path) -> list[Path]:
-    """Read ordered config paths, relative to the queue file's directory."""
+    """Read config paths in order, relative to the queue file's directory."""
     queue_path = Path(queue_path).expanduser().resolve()
     if not queue_path.is_file():
         raise FileNotFoundError(f"Queue file does not exist: {queue_path}")
@@ -52,54 +46,85 @@ def read_queue(queue_path: str | Path) -> list[Path]:
     return config_paths
 
 
-def train_config(
-    config_path: Path,
-    on_run_created: Callable[[Path], None] | None = None,
+@rank_zero_only
+def log(message: str) -> None:
+    """Print a timestamped queue message on rank zero."""
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"[{timestamp}] {message}", flush=True)
+
+
+def _run_config(
+    config_path: Path, index: int, total: int, preflight: bool
 ) -> dict[str, str]:
-    """Build and train one experiment, returning its run directory."""
-    config = load_config(config_path)
-    seed_experiment(config)
-    training_module = build_training_module(config)
-    model_summary = format_model_size_summary(training_module.model)
-    batch_size = config["data"]["batch_size"]
-    devices = config.get("trainer", {}).get("devices", "auto")
-    batch_summary = f"DataLoader batch size per device: {batch_size}"
-    if isinstance(devices, int):
-        batch_summary += (
-            f"\nEffective batch size across {devices} devices: "
-            f"{batch_size * devices} (assuming distributed data parallel)"
-        )
-    if rank_zero_only.rank == 0:
-        print(f"Model size:\n{model_summary}\n{batch_summary}", flush=True)
-
-    data = build_data_module(config)
-    # Trainer.fit() coordinates prepare_data() across distributed workers.
-
-    trainer = build_trainer(config)
-    run_dir = Path(trainer.checkpoint_callback.dirpath).parent
-    if rank_zero_only.rank == 0:
-        (run_dir / "model_summary.txt").write_text(
-            model_summary + "\n" + batch_summary + "\n", encoding="utf-8"
-        )
-        if on_run_created is not None:
-            on_run_created(run_dir)
-    trainer.fit(training_module, datamodule=data)
-
-    # ModelCheckpoint has now resolved the shared directory on every rank.
-    run_dir = Path(trainer.checkpoint_callback.dirpath).parent
-    if trainer.is_global_zero:
-        print(f"Best checkpoint: {trainer.checkpoint_callback.best_model_path}", flush=True)
-        print(f"Last checkpoint: {trainer.checkpoint_callback.last_model_path}", flush=True)
-    return {
-        "run_dir": str(run_dir),
-        "best_checkpoint": trainer.checkpoint_callback.best_model_path,
-        "last_checkpoint": trainer.checkpoint_callback.last_model_path,
+    """Load and execute one config, retaining failures for the queue report."""
+    started = monotonic()
+    record = {
+        "index": str(index),
+        "config": str(config_path),
+        "status": "running",
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "finished_at": "",
+        "run_dir": "",
+        "best_checkpoint": "",
+        "last_checkpoint": "",
+        "error": "",
+        "elapsed": "",
     }
+    mode = "PREFLIGHT" if preflight else "START"
+    log(f"[{index}/{total}] {mode} {config_path}")
+
+    def record_run_directory(run_dir: Path) -> None:
+        record["run_dir"] = str(run_dir)
+        record["best_checkpoint"] = str(run_dir / "checkpoints" / "best.ckpt")
+        record["last_checkpoint"] = str(run_dir / "checkpoints" / "last.ckpt")
+
+    try:
+        config = load_config(config_path)
+        if preflight:
+            report = run_config_preflight(config)
+            record["status"] = "preflight_passed" if report["success"] else "preflight_failed"
+            record["error"] = report["error"] or ""
+        else:
+            record.update(run_training(config, on_run_created=record_run_directory))
+            record["status"] = "completed"
+    except Exception as exc:
+        record["status"] = "preflight_failed" if preflight else "failed"
+        record["error"] = str(exc)
+        log(traceback.format_exc().rstrip())
+
+    record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    record["elapsed"] = f"{monotonic() - started:.1f}s"
+    label = record["status"].replace("_", " ").upper()
+    log(f"[{index}/{total}] {label} {config_path}")
+    if record["status"] in ("failed", "preflight_failed"):
+        log("Continuing to the next config.")
+    return record
 
 
-def main(argv: list[str] | None = None) -> int:
+def _print_queue_report(records: list[dict[str, str]], preflight: bool) -> int:
+    """Print the final queue summary and return its exit code."""
+    passed = 0
+    log("Preflight report" if preflight else "Queue report")
+    for record in records:
+        succeeded = record["status"] in ("completed", "preflight_passed")
+        passed += int(succeeded)
+        status = "PASS" if succeeded else "FAIL"
+        log(f"{record['index']}. {Path(record['config']).name}: {status} ({record['elapsed']})")
+        if record["run_dir"]:
+            log(f"   Run directory: {record['run_dir']}")
+        if record["error"]:
+            log(f"   {record['error']}")
+    total = len(records)
+    mode = "Preflight" if preflight else "Queue"
+    description = "configs passed" if preflight else "runs completed"
+    log(f"{mode} finished: {passed}/{total} {description}; {total - passed} failed.")
+    return 0 if passed == total else 1
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Read the command-line options and validate the queue paths."""
     parser = argparse.ArgumentParser(
-        description="Train experiment configs one at a time in queue-file order."
+        description="Run experiment configs one at a time in queue-file order."
     )
     parser.add_argument(
         "queue_file",
@@ -109,110 +134,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--preflight",
         action="store_true",
-        help=(
-            "Check one training step for each config using its batch size and "
-            "GPU setup, then exit without full training."
-        ),
+        help="Run one GPU training step per config with synthetic batches, then exit.",
     )
     args = parser.parse_args(argv)
-
     try:
-        config_paths = read_queue(args.queue_file)
+        args.config_paths = read_queue(args.queue_file)
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
+    return args
 
-    @rank_zero_only
-    def log(message: str) -> None:
-        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-        print(f"[{timestamp}] {message}", flush=True)
 
-    records = [
-        {
-            "index": str(index),
-            "config": str(config_path),
-            "status": "pending",
-            "started_at": "",
-            "finished_at": "",
-            "run_dir": "",
-            "best_checkpoint": "",
-            "last_checkpoint": "",
-            "error": "",
-            "elapsed": "",
-        }
-        for index, config_path in enumerate(config_paths, start=1)
-    ]
-
-    total = len(config_paths)
-    for index, config_path in enumerate(config_paths, start=1):
-        record = records[index - 1]
-        started = monotonic()
-        record["status"] = "running"
-        record["started_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        mode = "PREFLIGHT" if args.preflight else "START"
-        log(f"[{index}/{total}] {mode} {config_path}")
-
-        def record_run_directory(run_dir: Path) -> None:
-            record["run_dir"] = str(run_dir)
-            record["best_checkpoint"] = str(run_dir / "checkpoints" / "best.ckpt")
-            record["last_checkpoint"] = str(run_dir / "checkpoints" / "last.ckpt")
-
-        try:
-            if args.preflight:
-                config = load_config(config_path)
-                seed_experiment(config)
-                batch_size = config["data"]["batch_size"]
-                devices = config.get("trainer", {}).get("devices", "auto")
-                training_module = build_training_module(config)
-                log(
-                    "Model size:\n"
-                    f"{format_model_size_summary(training_module.model)}"
-                )
-                log(f"Configured per-device batch size: {batch_size}; devices: {devices}")
-                preflight_training(config, training_module)
-                record["status"] = "preflight_passed"
-            else:
-                result = train_config(config_path, on_run_created=record_run_directory)
-                record.update(result)
-                record["status"] = "completed"
-        except Exception as exc:
-            error_trace = traceback.format_exc()
-            record["status"] = "preflight_failed" if args.preflight else "failed"
-            record["error"] = str(exc)
-            log(error_trace.rstrip())
-            label = "PREFLIGHT FAILED" if args.preflight else "FAILED"
-            log(f"[{index}/{total}] {label}; continuing to the next config: {config_path}")
-
-        record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        record["elapsed"] = f"{monotonic() - started:.1f}s"
-        if record["status"] == "completed":
-            log(f"[{index}/{total}] COMPLETED {config_path}")
-        elif record["status"] == "preflight_passed":
-            log(f"[{index}/{total}] PREFLIGHT PASSED {config_path}")
-
-    failure_status = "preflight_failed" if args.preflight else "failed"
-    failures = [record for record in records if record["status"] == failure_status]
-    log("Preflight report" if args.preflight else "Queue report")
-    for record in records:
-        status = "PASS" if record["status"] in ("completed", "preflight_passed") else "FAIL"
-        log(f"{record['index']}. {Path(record['config']).name}: {status} ({record['elapsed']})")
-        if record["run_dir"]:
-            log(f"   Run directory: {record['run_dir']}")
-        if record["error"]:
-            log(f"   {record['error']}")
-
-    if failures:
-        if args.preflight:
-            log(f"Preflight finished: {total - len(failures)}/{total} configs passed, {len(failures)} failed.")
-            return 1
-        log(f"Queue finished: {total - len(failures)}/{total} succeeded, {len(failures)} failed.")
-        return 1
-
-    if args.preflight:
-        log(f"Preflight passed for all {total} configs.")
-        return 0
-
-    log(f"Queue finished successfully ({total}/{total} runs).")
-    return 0
+def main(argv: list[str] | None = None) -> int:
+    """Run each queued config in the selected mode and summarize the results."""
+    args = _parse_args(argv)
+    records = []
+    total = len(args.config_paths)
+    for index, config_path in enumerate(args.config_paths, start=1):
+        records.append(_run_config(config_path, index, total, args.preflight))
+    return _print_queue_report(records, args.preflight)
 
 
 if __name__ == "__main__":
