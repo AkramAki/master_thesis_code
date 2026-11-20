@@ -4,12 +4,14 @@ Run from the repository root in the project environment:
     python -m radio_diffusion.training.optuna_search --study dit-search --hours 72
     python -m radio_diffusion.training.optuna_search --study dit-search --preflight
 
-Dashboard, from the same directory:
-    optuna-dashboard optuna.journal
+Dashboard, using the storage path printed at startup:
+    optuna-dashboard /path/to/OUTPUT_ROOT/optuna_runs/optuna.journal
 
 Edit CONFIG, SEARCH_SPACE, CONDITIONING_CHOICES, SAMPLER, and PRUNER below.
 Each study is one MLflow experiment; each trial is one MLflow run. Trial TOMLs
-and sample grids live under optuna_runs/<study>/ and are uploaded to MLflow.
+and sample grids live under OUTPUT_ROOT/optuna_runs/<study>/ and are uploaded
+to MLflow. OUTPUT_ROOT is read from .env; the shared journal lives alongside
+the study directories. --output and --storage override these locations.
 One independent worker uses each GPU in SEARCH['gpus']; --gpu selects just one.
 Copy best.toml for normal training after the search. Study history persists,
 but interrupted model training is not resumed because weights are not saved.
@@ -29,7 +31,7 @@ import subprocess
 import sys
 from time import monotonic, sleep
 
-from radio_diffusion.paths import load_env
+from radio_diffusion.paths import get_path, load_env
 
 load_env()
 
@@ -175,9 +177,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--study", default=SEARCH["study"])
     parser.add_argument("--experiment", help="MLflow experiment; defaults to --study.")
-    parser.add_argument("--storage", type=Path, default=Path(SEARCH["storage"]))
+    parser.add_argument("--storage", type=Path, help="Journal path; defaults to OUTPUT_ROOT/optuna_runs/optuna.journal.")
     parser.add_argument("--gpu", type=int, help="Run one worker on this visible GPU index.")
-    parser.add_argument("--output", type=Path, default=Path(SEARCH["output_dir"]))
+    parser.add_argument("--output", type=Path, help="Output directory; defaults to OUTPUT_ROOT/optuna_runs.")
     parser.add_argument(
         "--hours", type=float, default=SEARCH["hours"], help="Search budget per launch (default: 72).",
     )
@@ -202,8 +204,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("Require 1 <= --prune-after < --epochs, or use --pruner none.")
     if args.trials is not None and args.trials < 1:
         parser.error("--trials must be positive.")
-    args.storage = args.storage.expanduser().resolve()
-    args.output = args.output.expanduser().resolve()
+    args.output = (args.output or get_path("OUTPUT_ROOT") / SEARCH["output_dir"]).expanduser().resolve()
+    args.storage = (args.storage or args.output / SEARCH["storage"]).expanduser().resolve()
     args.experiment = args.experiment or args.study
     return args
 
@@ -551,7 +553,10 @@ def main() -> int:
         torch.cuda.set_device(args.gpu)
     config = validate_search(args)
     study = create_study(args)
-    print(f"Study: {study.study_name}\nMLflow experiment: {args.experiment}\nStorage: {args.storage}")
+    print(
+        f"Study: {study.study_name}\nMLflow experiment: {args.experiment}\n"
+        f"Storage: {args.storage}\nOutput directory: {args.output / args.study}", flush=True,
+    )
     print("The budget stops new trials; active trials can finish afterward.", flush=True)
     if args.gpu is None and config.trainer.accelerator != "cpu":
         launch_workers(args, config)
