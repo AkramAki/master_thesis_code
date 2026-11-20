@@ -59,11 +59,15 @@ class MLflowTrackingCallback(Callback):
         run_dir: Path,
         tracking_uri: str,
         study: str | None = None,
+        experiment_name: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         self.config = deepcopy(dict(config))
         self.run_dir = run_dir
         self.tracking_uri = tracking_uri
         self.study = study
+        self.experiment_name = experiment_name
+        self.run_id = run_id
         self.logger: MLFlowLogger | None = None
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
@@ -91,17 +95,22 @@ class MLflowTrackingCallback(Callback):
             tags.update(_git_tags())
 
         self.logger = MLFlowLogger(
-            experiment_name=data.experiment_name,
+            experiment_name=self.experiment_name or data.experiment_name,
             run_name=f"{self.config['run']['name']}_{self.run_dir.name}",
             tracking_uri=self.tracking_uri,
             tags=tags,
             log_model=False,
             synchronous=True,
+            run_id=self.run_id,
         )
         trainer.loggers = [*trainer.loggers, self.logger]
         if not trainer.is_global_zero:
             return
+        self._log_parameters(trainer, pl_module)
 
+    def _log_parameters(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Log verified dataset details and the resolved experiment settings."""
+        data = trainer.datamodule
         resolved = deepcopy(self.config)
         resolved["run"]["output_dir"] = str(self.run_dir.parent)
         resolved["data"].update(
@@ -123,7 +132,7 @@ class MLflowTrackingCallback(Callback):
         )
         self.logger.log_hyperparams(parameters)
         print(
-            f"MLflow experiment: {data.experiment_name}\n"
+            f"MLflow experiment: {self.experiment_name or data.experiment_name}\n"
             f"MLflow run ID: {self.logger.run_id}\n"
             f"MLflow server: {self.tracking_uri}",
             flush=True,
