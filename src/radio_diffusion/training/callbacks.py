@@ -19,6 +19,10 @@ _CONDITIONING_LABELS = {
     "jet_pa_deg": "Jet PA (deg)",
     "jet_radial_extent_mas": "Jet extent (mas)",
     "ridgeline_arc_clipped": "Ridge arc clipped",
+    "cropped_image_pixel_maximum": "Crop maximum (Jy/beam)",
+    "cropped_image_pixel_minimum": "Crop minimum (Jy/beam)",
+    "cropped_image_pixel_mean": "Crop mean (Jy/beam)",
+    "cropped_image_pixel_std": "Crop std (Jy/beam)",
 }
 
 
@@ -27,7 +31,8 @@ class SampleGridCallback(Callback):
 
     Conditioning is either explicit scalar/list values or seeded complete rows
     drawn once from the training split. Every artifact uses the same generated
-    batch. Local generators preserve the training RNG state.
+    batch. Final images use physical intensities; denoising snapshots retain
+    model coordinates. Local generators preserve the training RNG state.
     """
 
     def __init__(
@@ -179,6 +184,27 @@ class SampleGridCallback(Callback):
             return
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        samples, snapshots, stage_steps, use_masks = self._generate_samples(trainer, pl_module)
+        samples, normalization = self._restore_sample_scale(trainer, samples)
+        filename = f"epoch={epoch_number:04d}-step={trainer.global_step:08d}"
+        torch.save(samples, self.output_dir / f"{filename}.pt")
+        records = self._sample_records()
+        manifest_path = self._write_sample_manifest(
+            trainer, pl_module, filename, records, stage_steps, use_masks, normalization,
+        )
+        grid_paths = [manifest_path] + self._save_sample_grids(
+            samples, snapshots, records, filename, epoch_number,
+            stage_steps, pl_module.diffusion.num_steps, use_masks,
+        )
+        print(
+            f"Saved {self.shape[0]} samples for epoch {epoch_number}: {self.output_dir}\n"
+            f"Final grid: {self.save_final_grid}; denoising grids: {self.save_denoising_grids}",
+            flush=True,
+        )
+        self._log_artifacts(trainer, grid_paths)
+
+    def _generate_samples(self, trainer: Trainer, pl_module: LightningModule):
+        """Generate samples and retain denoising snapshots in model coordinates."""
         device = pl_module.device
         total_steps = pl_module.diffusion.num_steps
         stage_steps = [round(total_steps * index / 3) for index in range(4)]
@@ -201,32 +227,52 @@ class SampleGridCallback(Callback):
             on_step=capture_snapshot if self.save_denoising_grids else None,
         )
 
-        samples = samples.detach().cpu()
-        filename = f"epoch={epoch_number:04d}-step={trainer.global_step:08d}"
-        torch.save(samples, self.output_dir / f"{filename}.pt")
-        records = self._sample_records()
+        return samples.detach().cpu(), snapshots, stage_steps, use_masks
+
+    def _restore_sample_scale(self, trainer: Trainer, samples: torch.Tensor):
+        """Use the data module's mapping and physical per-image conditioning."""
+        normalizer = getattr(trainer.datamodule, "normalizer", None)
+        if normalizer is None:
+            return samples, None
+        metadata = {**trainer.datamodule.dataset_metadata, **self._conditioning_batch["metadata"]}
+        return normalizer.inverse(samples, metadata), trainer.datamodule.state_dict()["normalization"]
+
+    def _write_sample_manifest(
+        self, trainer, pl_module, filename, records, stage_steps, use_masks, normalization,
+    ) -> Path:
+        """Record the actual inverse mapping alongside physical final samples."""
+        manifest_path = self.output_dir / f"{filename}.json"
+        manifest = {
+            "epoch": trainer.current_epoch + 1,
+            "global_step": trainer.global_step,
+            "noise_seed": self.seed,
+            "conditioning_mode": self.conditioning_mode,
+            "conditioning_seed": self.conditioning_seed,
+            "use_validity_masks": use_masks,
+            "total_diffusion_steps": pl_module.diffusion.num_steps,
+            "denoising_completed_steps": stage_steps if self.save_denoising_grids else [],
+            "eligible_observations": self._conditioning_batch.get("eligible_observations"),
+            "with_replacement": self._conditioning_batch.get("with_replacement", False),
+            "normalization": normalization,
+            "sample_coordinate_space": "physical",
+            "denoising_coordinate_space": "model",
+            "samples": records,
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n")
+        return manifest_path
+
+    def _save_sample_grids(
+        self, samples, snapshots, records, filename, epoch_number,
+        stage_steps, total_steps, use_masks,
+    ) -> list[Path]:
+        """Plot physical final samples and the model-space denoising trajectory."""
         sample_labels = self._sample_labels(records)
         conditioning_title = (
             "Unconditional" if not self.conditioning_params
             else f"Conditioning: {self.conditioning_mode}; validity masks: "
             + ("on" if use_masks else "off")
         )
-        manifest_path = self.output_dir / f"{filename}.json"
-        manifest = {
-            "epoch": epoch_number,
-            "global_step": trainer.global_step,
-            "noise_seed": self.seed,
-            "conditioning_mode": self.conditioning_mode,
-            "conditioning_seed": self.conditioning_seed,
-            "use_validity_masks": use_masks,
-            "total_diffusion_steps": total_steps,
-            "denoising_completed_steps": stage_steps if self.save_denoising_grids else [],
-            "eligible_observations": batch.get("eligible_observations"),
-            "with_replacement": batch.get("with_replacement", False),
-            "samples": records,
-        }
-        manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n")
-        grid_paths = [manifest_path]
+        grid_paths = []
         if self.save_final_grid:
             final_path = self.output_dir / f"{filename}.png"
             save_sample_grid(
@@ -235,37 +281,44 @@ class SampleGridCallback(Callback):
                 sample_labels=sample_labels,
             )
             grid_paths.append(final_path)
-        progress_dir = self.output_dir / "denoising" / filename
         if self.save_denoising_grids:
-            column_labels = [
-                (
-                    "Initial noise" if step == 0 else "Final" if step == total_steps
-                    else f"{total_steps - step} noise steps remaining"
-                ) + f"\n{step}/{total_steps} reverse steps"
-                for step in stage_steps
-            ]
-            for start in range(0, self.shape[0], 4):
-                stop = min(start + 4, self.shape[0])
-                trajectory = torch.stack(
-                    [snapshots[step][start:stop] for step in stage_steps], dim=1
-                )
-                path = progress_dir / f"samples={start + 1:02d}-{stop:02d}.png"
-                save_sample_grid(
-                    trajectory.flatten(0, 1), path, nrow=4,
-                    title=(
-                        f"Epoch {epoch_number} — samples {start + 1}–{stop} denoising\n"
-                        f"{conditioning_title}"
-                    ),
-                    row_labels=sample_labels[start:stop],
-                    column_labels=column_labels,
-                )
-                grid_paths.append(path)
+            grid_paths.extend(self._save_denoising_grids(
+                snapshots, filename, sample_labels, epoch_number,
+                conditioning_title, stage_steps, total_steps,
+            ))
+        return grid_paths
 
-        print(
-            f"Saved {self.shape[0]} samples for epoch {epoch_number}: {self.output_dir}\n"
-            f"Final grid: {self.save_final_grid}; denoising grids: {self.save_denoising_grids}",
-            flush=True,
-        )
+    def _save_denoising_grids(
+        self, snapshots, filename, sample_labels, epoch_number,
+        conditioning_title, stage_steps, total_steps,
+    ) -> list[Path]:
+        """Save four-sample groups without inverse-transforming noisy states."""
+        progress_dir = self.output_dir / "denoising" / filename
+        column_labels = [
+            (
+                "Initial noise" if step == 0 else "Final" if step == total_steps
+                else f"{total_steps - step} noise steps remaining"
+            ) + f"\n{step}/{total_steps} reverse steps"
+            for step in stage_steps
+        ]
+        grid_paths = []
+        for start in range(0, self.shape[0], 4):
+            stop = min(start + 4, self.shape[0])
+            trajectory = torch.stack([snapshots[step][start:stop] for step in stage_steps], dim=1)
+            path = progress_dir / f"samples={start + 1:02d}-{stop:02d}.png"
+            save_sample_grid(
+                trajectory.flatten(0, 1), path, nrow=4,
+                title=(
+                    f"Epoch {epoch_number} — samples {start + 1}–{stop} denoising\n"
+                    f"{conditioning_title}"
+                ),
+                row_labels=sample_labels[start:stop], column_labels=column_labels,
+            )
+            grid_paths.append(path)
+        return grid_paths
+
+    def _log_artifacts(self, trainer: Trainer, grid_paths: list[Path]) -> None:
+        """Upload the same locally saved artifacts when MLflow logging is active."""
         for logger in trainer.loggers:
             if isinstance(logger, MLFlowLogger):
                 for path in grid_paths:

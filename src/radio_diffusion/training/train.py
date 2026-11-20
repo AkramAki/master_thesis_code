@@ -84,7 +84,7 @@ def build_training_module(config: ExperimentConfig) -> DDPMModule:
 
 def build_data_module(config: ExperimentConfig) -> MojaveDataModule:
     """Build the data module with the configured image shape and metadata fields."""
-    settings = asdict(config.data)
+    settings = vars(config.data).copy()
     settings.pop("type")
     if settings["data_dir"] is not None:
         data_dir = Path(settings["data_dir"]).expanduser()

@@ -23,6 +23,12 @@ val_fraction = 0.1
 test_fraction = 0.1
 seed = 42
 
+[data.normalization]
+enabled = true
+transform = "linear"
+bounds = "per_image"
+log_scale = 1.0
+
 [model]
 type = "conditioned_dit"
 in_channels = 1
@@ -32,7 +38,12 @@ hidden_size = 64
 depth = 2
 num_heads = 4
 mlp_ratio = 2.0
-conditioning_params = ["jet_pa_deg", "jet_radial_extent_mas"]
+conditioning_params = [
+    "jet_pa_deg",
+    "jet_radial_extent_mas",
+    "cropped_image_pixel_minimum",
+    "cropped_image_pixel_maximum",
+]
 
 [model.conditioning_settings]
 use_validity_masks = true

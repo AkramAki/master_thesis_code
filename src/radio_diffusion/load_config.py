@@ -118,6 +118,34 @@ class TrainerSettings:
 
 
 @dataclass
+class NormalizationSettings:
+    """Transform intensities, then rescale their minimum/maximum to zero/one.
+
+    Shared bounds use the dataset-wide cropped-pixel minimum and maximum from
+    the saved summary. Per-image bounds use each crop's saved extrema instead.
+    Both bounds receive the same intensity transformation as the image before
+    rescaling. Statistics remain in physical units in preprocessing metadata.
+    log1p applies log(1 + x/log_scale); signed_log1p applies
+    sign(x) * log(1 + abs(x)/log_scale). Disabled normalization is the identity.
+    """
+
+    enabled: bool = False
+    transform: Literal["linear", "log1p", "signed_log1p"] = "linear"
+    bounds: Literal["shared", "per_image"] = "shared"
+    log_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        _check_type(self.enabled, bool, "data.normalization.enabled")
+        if self.transform not in ("linear", "log1p", "signed_log1p"):
+            raise ValueError("data.normalization.transform must be linear, log1p or signed_log1p.")
+        if self.bounds not in ("shared", "per_image"):
+            raise ValueError("data.normalization.bounds must be shared or per_image.")
+        _check_number(self.log_scale, "data.normalization.log_scale")
+        if self.log_scale == 0:
+            raise ValueError("data.normalization.log_scale must be positive.")
+
+
+@dataclass
 class DataSettings:
     """MOJAVE dataset location, dimensions, and batch settings."""
 
@@ -131,6 +159,7 @@ class DataSettings:
     data_dir: str | None = None
     remote_source: str | None = None
     variant: str = "mojave_unspecified"
+    normalization: NormalizationSettings = field(default_factory=NormalizationSettings)
 
     def __post_init__(self) -> None:
         if self.type != "mojave":
@@ -151,6 +180,11 @@ class DataSettings:
         _check_text(self.variant, "data.variant")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", self.variant):
             raise ValueError("data.variant must contain letters, digits, '_' or '-'.")
+        if isinstance(self.normalization, dict):
+            self.normalization = _build_settings(
+                NormalizationSettings, self.normalization, "data.normalization"
+            )
+        _check_type(self.normalization, NormalizationSettings, "data.normalization")
 
 
 @dataclass
@@ -458,6 +492,7 @@ class ExperimentConfig:
         if self.samples.seed is None:
             self.samples.seed = self.run.seed
         self._resolve_sample_shape()
+        self._check_normalization_conditioning()
         self._check_sample_conditioning()
 
     @property
@@ -516,6 +551,33 @@ class ExperimentConfig:
         for name, value in conditioning.values.items():
             if isinstance(value, list) and len(value) != self.samples.num_samples:
                 raise ValueError(f"samples.conditioning.{name} must have one value per sample.")
+
+    def _check_normalization_conditioning(self) -> None:
+        """Require the physical scale as conditioning for per-image generation."""
+        settings = self.data.normalization
+        if not settings.enabled or settings.bounds != "per_image":
+            return
+        fields = ("cropped_image_pixel_minimum", "cropped_image_pixel_maximum")
+        if not set(fields).issubset(self.conditioning_params):
+            raise ValueError(
+                "Per-image normalization requires a conditioned model with "
+                "cropped_image_pixel_minimum and cropped_image_pixel_maximum "
+                "in model.conditioning_params."
+            )
+        conditioning = self.samples.conditioning
+        if not self.samples.enabled or conditioning is None or conditioning.mode == "auto":
+            return
+        bounds = []
+        for field in fields:
+            values = conditioning.values.get(field)
+            if values is None:
+                return
+            values = values if isinstance(values, list) else [values] * self.samples.num_samples
+            for value in values:
+                _check_number(value, f"samples.conditioning.{field}", -math.inf)
+            bounds.append(values)
+        if any(lower > upper for lower, upper in zip(*bounds)):
+            raise ValueError("Sample conditioning requires cropped pixel minimum <= maximum.")
 
     @classmethod
     def from_dict(cls, values: dict[str, Any], source_path: Path) -> "ExperimentConfig":
