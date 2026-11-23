@@ -65,7 +65,7 @@ def build_diffusion(config: ExperimentConfig) -> GaussianDiffusion:
 
 
 def build_loss(config: ExperimentConfig) -> WeightedLoss:
-    """Build the configured weighted regression loss."""
+    """Build the configured weighted regression and image loss."""
     return WeightedLoss(config.loss.loss, config.loss.weights)
 
 
@@ -83,6 +83,8 @@ def build_training_module(config: ExperimentConfig) -> DDPMModule:
         optimizer_name=optimizer_name,
         optimizer_kwargs=optimizer,
         validation_seed=config.run.seed,
+        ssim_before_transform=config.loss.ssim_before_transform or False,
+        normalization=config.data.normalization,
     )
 
 
