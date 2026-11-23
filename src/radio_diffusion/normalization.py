@@ -1,5 +1,7 @@
 """Reversible intensity transforms followed by min/max rescaling to [0, 1]."""
 
+import math
+
 import torch
 
 from radio_diffusion.load_config import NormalizationSettings
@@ -10,7 +12,8 @@ class ImageIntensityTransform:
 
     When enabled, normalize applies both operations in that order, and inverse
     reverses them. When disabled, normalize and inverse bypass both operations.
-    Settings are validated before construction.
+    Inverse inputs outside [0, 1] are clipped or extrapolated linearly according
+    to the required inverse_out_of_bounds setting.
     """
 
     def __init__(self, settings: NormalizationSettings) -> None:
@@ -77,12 +80,27 @@ class ImageIntensityTransform:
         return torch.sign(scaled) * torch.log1p(scaled.abs())
 
     def _inverse_transform(self, images: torch.Tensor) -> torch.Tensor:
+        """Scale exponentials before they grow and preserve the derivative at zero."""
         settings = self.settings
         if settings.transform == "linear":
             return images
+        dtype = images.dtype
+        images = images.to(dtype=torch.float64)
+        positive = images >= 0
+        positive_images = torch.where(positive, images, torch.zeros_like(images))
+        negative_images = torch.where(positive, torch.zeros_like(images), images)
         if settings.transform == "log1p":
-            return torch.expm1(images) * settings.log_scale
-        return torch.sign(images) * torch.expm1(images.abs()) * settings.log_scale
+            positive_result = (
+                torch.exp(positive_images + math.log(settings.log_scale))
+                * -torch.expm1(-positive_images)
+            )
+            negative_result = torch.expm1(negative_images) * settings.log_scale
+            return torch.where(positive, positive_result, negative_result).to(dtype=dtype)
+        scale = torch.exp(images.abs() + math.log(settings.log_scale))
+        result = scale * torch.where(
+            positive, -torch.expm1(-positive_images), torch.expm1(negative_images),
+        )
+        return result.to(dtype=dtype)
 
     def _bounds(self, images: torch.Tensor, metadata: dict):
         """Transform the saved extrema and broadcast them over each image."""
@@ -114,22 +132,55 @@ class ImageIntensityTransform:
         return result
 
     def _inverse_image(self, images: torch.Tensor, metadata: dict) -> torch.Tensor:
-        """Undo min/max rescaling, then undo the intensity transformation."""
+        """Invert [0, 1] exactly; apply the selected policy outside that interval."""
         settings = (
             f"transform={self.settings.transform}, bounds={self.settings.bounds}, "
-            f"log_scale={self.settings.log_scale}"
+            f"log_scale={self.settings.log_scale}, "
+            f"inverse_out_of_bounds={self.settings.inverse_out_of_bounds}"
         )
         self._validate_images(images, stage=f"inverse normalization input ({settings})")
+        # Keep inverse arithmetic in float64, then validate the original output dtype.
+        values = images.to(dtype=torch.float64)
         try:
-            minimum, maximum = self._bounds(images, metadata)
+            minimum, maximum = self._bounds(values, metadata)
         except (ValueError, RuntimeError) as error:
             raise ValueError(f"Inverse normalization metadata bounds ({settings}): {error}") from error
-        transformed = images * (maximum - minimum) + minimum
+        below, above = values < 0, values > 1
+        if self.settings.inverse_out_of_bounds == "clip":
+            bounded = values.clamp(0, 1)
+        else:
+            # Strict comparisons retain the exact inverse derivative at the endpoints.
+            bounded = torch.where(
+                below, torch.zeros_like(values),
+                torch.where(above, torch.ones_like(values), values),
+            )
+        span = maximum - minimum
+        transformed = bounded * span + minimum
         self._validate_images(
-            transformed, stage=f"inverse min/max rescaling output ({settings})", source=images,
+            transformed, stage=f"inverse min/max rescaling output ({settings})", source=bounded,
         )
         result = self._inverse_transform(transformed)
         self._validate_images(
             result, stage=f"inverse intensity transform output ({settings})", source=transformed,
         )
-        return result
+        if self.settings.inverse_out_of_bounds == "linear":
+            if self.settings.transform == "linear":
+                lower_slope = upper_slope = span
+            else:
+                endpoints = torch.stack((minimum, maximum))
+                if self.settings.transform == "signed_log1p":
+                    endpoints = endpoints.abs()
+                lower_slope, upper_slope = (
+                    torch.exp(endpoints + math.log(self.settings.log_scale)) * span
+                ).unbind()
+            lower_delta = torch.where(below, values, torch.zeros_like(values))
+            upper_delta = torch.where(above, values - 1, torch.zeros_like(values))
+            result = result + lower_delta * lower_slope + upper_delta * upper_slope
+            self._validate_images(
+                result, stage=f"inverse linear extrapolation output ({settings})", source=values,
+            )
+        output = result.to(dtype=images.dtype)
+        self._validate_images(
+            output, stage=f"inverse output conversion to {images.dtype} ({settings})", source=result,
+        )
+        return output

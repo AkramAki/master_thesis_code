@@ -126,13 +126,19 @@ class NormalizationSettings:
     Both bounds receive the same intensity transformation as the image before
     rescaling. Statistics remain in physical units in preprocessing metadata.
     log1p applies log(1 + x/log_scale); signed_log1p applies
-    sign(x) * log(1 + abs(x)/log_scale). Disabled normalization is the identity.
+    sign(x) * log(1 + abs(x)/log_scale). Disabled normalization is the identity
+    and requires no inverse strategy. Enabled normalization requires
+    inverse_out_of_bounds even with a linear transform: clip restricts inverse
+    inputs to [0, 1]; linear extrapolates with the inverse's boundary slopes.
+    For a linear transform, the linear strategy preserves unrestricted inverse
+    min/max scaling, while clip limits normalized inputs before inversion.
     """
 
     enabled: bool = False
     transform: Literal["linear", "log1p", "signed_log1p"] = "linear"
     bounds: Literal["shared", "per_image"] = "shared"
     log_scale: float = 1.0
+    inverse_out_of_bounds: Literal["clip", "linear"] | None = None
 
     def __post_init__(self) -> None:
         _check_type(self.enabled, bool, "data.normalization.enabled")
@@ -143,6 +149,13 @@ class NormalizationSettings:
         _check_number(self.log_scale, "data.normalization.log_scale")
         if self.log_scale == 0:
             raise ValueError("data.normalization.log_scale must be positive.")
+        if self.inverse_out_of_bounds not in (None, "clip", "linear") or (
+            self.enabled and self.inverse_out_of_bounds is None
+        ):
+            raise ValueError(
+                "data.normalization.inverse_out_of_bounds must explicitly select "
+                "'clip' or 'linear' when normalization is enabled."
+            )
 
 
 @dataclass
@@ -359,19 +372,24 @@ class LossSettings:
 
     loss: list[str] = field(default_factory=lambda: ["MSELoss"])
     weights: list[float] = field(default_factory=lambda: [1.0])
+    ssim_before_transform: bool | None = None
 
     def __post_init__(self) -> None:
         _check_type(self.loss, list, "loss.loss")
         _check_type(self.weights, list, "loss.weights")
         if not self.loss or len(self.loss) != len(self.weights):
             raise ValueError("loss.weights must have one weight per loss in loss.loss.")
-        supported = ("MSELoss", "L1Loss", "SmoothL1Loss", "HuberLoss")
+        supported = ("MSELoss", "L1Loss", "SmoothL1Loss", "HuberLoss", "SSIMLoss")
         for name in self.loss:
             _check_text(name, "loss.loss")
             if name not in supported:
                 raise ValueError(f"Unsupported regression loss: {name!r}.")
         if len(set(self.loss)) != len(self.loss):
             raise ValueError("loss.loss must not contain duplicate loss names.")
+        if self.ssim_before_transform is not None:
+            _check_type(self.ssim_before_transform, bool, "loss.ssim_before_transform")
+            if "SSIMLoss" not in self.loss:
+                raise ValueError("loss.ssim_before_transform requires SSIMLoss in loss.loss.")
         for weight in self.weights:
             _check_number(weight, "loss.weights")
         try:
