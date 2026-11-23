@@ -5,8 +5,13 @@ import torch
 from radio_diffusion.load_config import NormalizationSettings
 
 
-class ImageNormalizer:
-    """Configure normalization and its inverse from validated settings."""
+class ImageIntensityTransform:
+    """Apply the selected intensity transformation, then min–max scaling.
+
+    When enabled, normalize applies both operations in that order, and inverse
+    reverses them. When disabled, normalize and inverse bypass both operations.
+    Settings are validated before construction.
+    """
 
     def __init__(self, settings: NormalizationSettings) -> None:
         self.settings = settings

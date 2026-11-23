@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 from radio_diffusion.load_config import NormalizationSettings
 from radio_diffusion.paths import get_mojave_data_dir
-from radio_diffusion.normalization import ImageNormalizer
+from radio_diffusion.normalization import ImageIntensityTransform
 from radio_diffusion.data.preprocess_mojave import (
     PREPROCESSING_SETTINGS,
     preprocess_data,
@@ -93,7 +93,7 @@ class MojaveDataset(Dataset):
         self.metadata_fields = _validate_metadata_fields(metadata_fields)
         self.dataset_metadata = dataset_metadata if dataset_metadata is not None else {}
         settings = normalization if normalization is not None else NormalizationSettings()
-        self.normalizer = ImageNormalizer(settings)
+        self.normalizer = ImageIntensityTransform(settings)
 
     def __len__(self):
         return len(self.paths)
@@ -240,7 +240,7 @@ class MojaveDataModule(LightningDataModule):
         self.metadata_fields = _validate_metadata_fields(metadata_fields)
         self.normalization = normalization if normalization is not None else NormalizationSettings()
         self.dataset_metadata: dict = {}
-        self.normalizer: ImageNormalizer | None = None
+        self.normalizer: ImageIntensityTransform | None = None
         self.metadata_missing_counts: dict[str, int] = {}
         self._complete_conditioning_rows: dict[Path, dict] = {}
         self.image_shape: tuple[int, int, int] | None = None
@@ -291,7 +291,7 @@ class MojaveDataModule(LightningDataModule):
         paths = self._dataset_paths()
         if self.normalizer is None:
             self.dataset_metadata = self._read_dataset_metadata()
-            self.normalizer = ImageNormalizer(self.normalization)
+            self.normalizer = ImageIntensityTransform(self.normalization)
         dataset = MojaveDataset(paths, self.expected_image_shape, self.metadata_fields)
         first_sample = dataset[0]
         first_image = first_sample["image"] if self.metadata_fields else first_sample
@@ -401,11 +401,11 @@ class MojaveDataModule(LightningDataModule):
             raise ValueError("Checkpoint normalization settings do not match data.normalization.")
         self.normalization = settings
         self.dataset_metadata = state["dataset_metadata"]
-        self.normalizer = ImageNormalizer(settings)
+        self.normalizer = ImageIntensityTransform(settings)
         for name in ("train_dataset", "val_dataset", "test_dataset"):
             if hasattr(self, name):
                 dataset = getattr(self, name)
-                dataset.normalizer = ImageNormalizer(settings)
+                dataset.normalizer = ImageIntensityTransform(settings)
                 dataset.dataset_metadata = self.dataset_metadata
 
     def sample_conditioning(self, count: int, seed: int) -> dict:
