@@ -26,14 +26,44 @@ class ImageIntensityTransform:
         return image
 
     @staticmethod
-    def _validate_images(images: torch.Tensor) -> None:
+    def _tensor_summary(images: torch.Tensor) -> str:
+        """Describe a failed tensor without including its full contents."""
+        if not isinstance(images, torch.Tensor):
+            return f"type={type(images).__name__}"
+        summary = f"dtype={images.dtype}, shape={tuple(images.shape)}, device={images.device}"
+        if not images.is_floating_point():
+            return summary
+        values = images.detach()
+        finite = values[torch.isfinite(values)]
+        finite_range = (
+            f"[{finite.min().item():.6g}, {finite.max().item():.6g}]"
+            if finite.numel() else "none"
+        )
+        return (
+            f"{summary}, finite_range={finite_range}, "
+            f"nan_count={torch.isnan(values).sum().item()}, "
+            f"posinf_count={torch.isposinf(values).sum().item()}, "
+            f"neginf_count={torch.isneginf(values).sum().item()}"
+        )
+
+    @classmethod
+    def _validate_images(
+        cls, images: torch.Tensor, *, stage: str = "normalization",
+        source: torch.Tensor | None = None,
+    ) -> None:
         if (
             not isinstance(images, torch.Tensor)
             or not images.is_floating_point()
             or images.numel() == 0
             or not torch.isfinite(images).all()
         ):
-            raise ValueError("Normalization requires nonempty, finite floating-point tensors.")
+            message = (
+                f"Invalid tensor at {stage}: expected a nonempty, finite floating-point tensor. "
+                f"Received: {cls._tensor_summary(images)}."
+            )
+            if source is not None:
+                message += f" Input to this operation: {cls._tensor_summary(source)}."
+            raise ValueError(message)
 
     def _transform(self, images: torch.Tensor) -> torch.Tensor:
         settings = self.settings
@@ -63,10 +93,10 @@ class ImageIntensityTransform:
             values.append(torch.as_tensor(metadata[field], device=images.device, dtype=images.dtype))
         minimum, maximum = torch.broadcast_tensors(*values)
         bounds = self._transform(torch.stack((minimum, maximum)))
-        self._validate_images(bounds)
+        self._validate_images(bounds, stage="transformed normalization metadata bounds")
         if (bounds[0] > bounds[1]).any():
             raise ValueError("Normalization requires transformed minimum <= maximum.")
-        self._validate_images(bounds[1] - bounds[0])
+        self._validate_images(bounds[1] - bounds[0], stage="normalization metadata span")
         if minimum.numel() == 1:
             return bounds.reshape(2).unbind()
         if images.ndim >= 4 and minimum.shape in ((len(images),), (len(images), 1)):
@@ -85,9 +115,21 @@ class ImageIntensityTransform:
 
     def _inverse_image(self, images: torch.Tensor, metadata: dict) -> torch.Tensor:
         """Undo min/max rescaling, then undo the intensity transformation."""
-        self._validate_images(images)
-        minimum, maximum = self._bounds(images, metadata)
+        settings = (
+            f"transform={self.settings.transform}, bounds={self.settings.bounds}, "
+            f"log_scale={self.settings.log_scale}"
+        )
+        self._validate_images(images, stage=f"inverse normalization input ({settings})")
+        try:
+            minimum, maximum = self._bounds(images, metadata)
+        except (ValueError, RuntimeError) as error:
+            raise ValueError(f"Inverse normalization metadata bounds ({settings}): {error}") from error
         transformed = images * (maximum - minimum) + minimum
+        self._validate_images(
+            transformed, stage=f"inverse min/max rescaling output ({settings})", source=images,
+        )
         result = self._inverse_transform(transformed)
-        self._validate_images(result)
+        self._validate_images(
+            result, stage=f"inverse intensity transform output ({settings})", source=transformed,
+        )
         return result

@@ -184,8 +184,16 @@ class SampleGridCallback(Callback):
             return
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        samples, snapshots, stage_steps, use_masks = self._generate_samples(trainer, pl_module)
-        samples, normalization = self._restore_sample_scale(trainer, samples)
+        operation = "generating images"
+        try:
+            samples, snapshots, stage_steps, use_masks = self._generate_samples(trainer, pl_module)
+            operation = "restoring physical intensities"
+            samples, normalization = self._restore_sample_scale(trainer, samples)
+        except (ValueError, RuntimeError) as error:
+            raise ValueError(
+                f"During sampling at epoch {epoch_number}, training step {trainer.global_step}: "
+                f"{operation} failed. {error}"
+            ) from error
         filename = f"epoch={epoch_number:04d}-step={trainer.global_step:08d}"
         torch.save(samples, self.output_dir / f"{filename}.pt")
         records = self._sample_records()
