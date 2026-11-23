@@ -1,4 +1,4 @@
-"""Configurable Diffusion Transformer for pixel-space noise prediction."""
+"""Configurable Diffusion Transformer for noise or clean-image prediction."""
 
 import math
 
@@ -103,11 +103,11 @@ class DiT(nn.Module):
 
     The model splits an image into non-overlapping patches, processes the patch
     tokens with timestep-conditioned transformer blocks, and maps the output
-    tokens back to a noise prediction with the same shape as the input.
+    tokens back to a noise or clean-image prediction at the input resolution.
 
     Args:
         in_channels: Number of input image channels.
-        out_channels: Number of predicted noise channels. Defaults to
+        out_channels: Number of prediction channels. Defaults to
             ``in_channels``.
         patch_size: Height and width of each square image patch.
         hidden_size: Transformer token and timestep-embedding size. Must be
@@ -194,7 +194,11 @@ class DiT(nn.Module):
         noisy_images: torch.Tensor,
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict noise for images shaped ``[B, C, H, W]`` and timesteps ``[B]``."""
+        """Predict noise or clean images from noisy inputs and timesteps.
+
+        Inputs have shape [B, in_channels, H, W] and timesteps have shape [B].
+        Predictions have shape [B, out_channels, H, W].
+        """
         return self._forward_with_tokens(noisy_images, timesteps)
 
     def _forward_with_tokens(

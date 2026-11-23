@@ -138,7 +138,7 @@ class SpatialSelfAttention(nn.Module):
 
 
 class UNet(nn.Module):
-    """Configurable time-conditioned U-Net for diffusion noise prediction.
+    """Configurable time-conditioned U-Net for noise or clean-image prediction.
 
     Args:
         in_channels: Number of input image channels.
@@ -299,7 +299,11 @@ class UNet(nn.Module):
         noisy_images: torch.Tensor,
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict noise from images shaped ``[B, C, H, W]`` and timesteps ``[B]``."""
+        """Predict noise or clean images from noisy inputs and timesteps.
+
+        Inputs have shape [B, in_channels, H, W] and timesteps have shape [B].
+        Predictions have shape [B, out_channels, H, W].
+        """
         if noisy_images.ndim != 4 or noisy_images.shape[1] != self.in_channels:
             raise ValueError(
                 "noisy_images must be shaped [B, in_channels, H, W]."
@@ -345,7 +349,7 @@ class UNet(nn.Module):
 
 
 class CompactUNet(nn.Module):
-    """Compact time-conditioned U-Net for diffusion noise prediction.
+    """Compact time-conditioned U-Net for noise or clean-image prediction.
 
     Args:
         in_channels: Number of input image channels.
@@ -443,7 +447,7 @@ class CompactUNet(nn.Module):
         noisy_images: torch.Tensor,
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict noise from noisy images and their diffusion timesteps.
+        """Predict noise or clean images from noisy images and diffusion timesteps.
 
         Args:
             noisy_images: Images of shape [B, in_channels, H, W].
@@ -451,7 +455,7 @@ class CompactUNet(nn.Module):
             timesteps: Tensor of shape [B] containing one timestep per image.
 
         Returns:
-            Predicted noise of shape [B, out_channels, H, W].
+            Predicted noise or clean images of shape [B, out_channels, H, W].
         """
         if noisy_images.ndim != 4 or noisy_images.shape[1] != self.in_channels:
             raise ValueError(

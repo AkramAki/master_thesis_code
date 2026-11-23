@@ -1,4 +1,4 @@
-"""Validated, weighted losses for diffusion noise prediction."""
+"""Validated, weighted regression losses for diffusion models."""
 
 import math
 
@@ -6,11 +6,11 @@ import torch
 from torch import nn
 
 # Pytorch supported losses
-_NOISE_LOSS_NAMES = ("MSELoss", "L1Loss", "SmoothL1Loss", "HuberLoss")
+_REGRESSION_LOSS_NAMES = ("MSELoss", "L1Loss", "SmoothL1Loss", "HuberLoss")
 
 
 class WeightedLoss(nn.Module):
-    """Combine noise-regression losses with nonnegative weights summing to one."""
+    """Combine regression losses with nonnegative weights summing to one."""
 
     def __init__(self, loss_names: list[str], weights: list[float]) -> None:
         super().__init__()
@@ -41,10 +41,10 @@ class WeightedLoss(nn.Module):
 
         losses = []
         for name in loss_names:
-            if name not in _NOISE_LOSS_NAMES:
+            if name not in _REGRESSION_LOSS_NAMES:
                 raise ValueError(
-                    f"Unknown or unsupported noise-prediction loss {name!r}. "
-                    f"Expected one of: {', '.join(_NOISE_LOSS_NAMES)}."
+                    f"Unknown or unsupported regression loss {name!r}. "
+                    f"Expected one of: {', '.join(_REGRESSION_LOSS_NAMES)}."
                 )
             losses.append(getattr(nn, name)())
 

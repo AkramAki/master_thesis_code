@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 import re
 import tomllib
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 import warnings
 
 
@@ -201,15 +201,30 @@ class ConditioningSettings:
 
 @dataclass
 class ModelSettings:
-    """Image channels and metadata settings shared by the supported models."""
+    """Prediction target, image channels, and metadata settings.
+
+    Model settings subclasses may restrict supported_prediction_targets.
+    """
+
+    supported_prediction_targets: ClassVar[tuple[str, ...]] = ("noise", "image")
 
     type: str
+    prediction_target: Literal["noise", "image"] = "noise"
     in_channels: int = 1
     out_channels: int | None = None
     conditioning_params: list[str] = field(default_factory=list)
     conditioning_settings: ConditioningSettings = field(default_factory=ConditioningSettings)
 
     def __post_init__(self) -> None:
+        _check_text(self.prediction_target, "model.prediction_target")
+        if self.prediction_target not in ("noise", "image"):
+            raise ValueError("model.prediction_target must be 'noise' or 'image'.")
+        if self.prediction_target not in self.supported_prediction_targets:
+            raise ValueError(
+                f"Model type {self.type!r} does not support prediction target "
+                f"{self.prediction_target!r}. Supported targets: "
+                + ", ".join(self.supported_prediction_targets)
+            )
         _check_int(self.in_channels, "model.in_channels", 1)
         if self.out_channels is None:
             self.out_channels = self.in_channels
@@ -340,7 +355,7 @@ class DiffusionSettings:
 
 @dataclass
 class LossSettings:
-    """Noise-prediction loss names and their weights."""
+    """Regression loss names and their weights."""
 
     loss: list[str] = field(default_factory=lambda: ["MSELoss"])
     weights: list[float] = field(default_factory=lambda: [1.0])
@@ -354,7 +369,7 @@ class LossSettings:
         for name in self.loss:
             _check_text(name, "loss.loss")
             if name not in supported:
-                raise ValueError(f"Unsupported noise-prediction loss: {name!r}.")
+                raise ValueError(f"Unsupported regression loss: {name!r}.")
         if len(set(self.loss)) != len(self.loss):
             raise ValueError("loss.loss must not contain duplicate loss names.")
         for weight in self.weights:
@@ -519,7 +534,7 @@ class ExperimentConfig:
         if shape[1] != self.model.in_channels:
             raise ValueError("samples.shape channels must match model.in_channels.")
         if self.model.out_channels != self.model.in_channels:
-            raise ValueError("model.out_channels must match model.in_channels for noise prediction.")
+            raise ValueError("model.out_channels must match model.in_channels for diffusion prediction.")
         count = self.samples.num_samples if self.samples.num_samples is not None else shape[0]
         height, width = shape[2:]
         if self.data.image_size is not None:

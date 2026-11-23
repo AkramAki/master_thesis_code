@@ -33,10 +33,11 @@ from radio_diffusion.training.tracking import MLflowTrackingCallback
 
 
 def build_model(config: ExperimentConfig) -> torch.nn.Module:
-    """Build the noise-prediction model from its validated settings."""
+    """Build the model architecture from its validated settings."""
     settings = asdict(config.model)
     model_type = config.model.type
     settings.pop("type")
+    settings.pop("prediction_target")
     settings.pop("conditioning_params")
     settings.pop("conditioning_settings")
     if model_type == "unet":
@@ -56,12 +57,15 @@ def build_model(config: ExperimentConfig) -> torch.nn.Module:
 
 
 def build_diffusion(config: ExperimentConfig) -> GaussianDiffusion:
-    """Build the configured diffusion process."""
-    return GaussianDiffusion(**asdict(config.diffusion))
+    """Build diffusion with the configured schedule and prediction target."""
+    return GaussianDiffusion(
+        **asdict(config.diffusion),
+        prediction_target=config.model.prediction_target,
+    )
 
 
 def build_loss(config: ExperimentConfig) -> WeightedLoss:
-    """Build the configured weighted noise-prediction loss."""
+    """Build the configured weighted regression loss."""
     return WeightedLoss(config.loss.loss, config.loss.weights)
 
 

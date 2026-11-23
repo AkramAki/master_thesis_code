@@ -1,6 +1,6 @@
-"""Gaussian forward diffusion for denoising diffusion models."""
+"""Gaussian forward diffusion and sampling for denoising diffusion models."""
 
-from typing import Callable
+from typing import Callable, Literal
 
 import torch
 from torch import nn
@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 
 
 class GaussianDiffusion(nn.Module):
-    """Manage a Gaussian noise schedule and its forward diffusion process.
+    """Manage Gaussian diffusion with noise or clean-image predictions.
 
     By default the beta schedule is linear. Passing ``betas`` allows a custom
     schedule while retaining the same precomputed diffusion coefficients.
@@ -20,6 +20,7 @@ class GaussianDiffusion(nn.Module):
         beta_start: First variance in the default linear schedule.
         beta_end: Last variance in the default linear schedule.
         betas: Optional custom one-dimensional variance schedule.
+        prediction_target: Whether model outputs represent noise or clean images.
     """
 
     def __init__(
@@ -28,8 +29,13 @@ class GaussianDiffusion(nn.Module):
         beta_start: float = 1e-4,
         beta_end: float = 0.02,
         betas: torch.Tensor | None = None,
+        *,
+        prediction_target: Literal["noise", "image"] = "noise",
     ) -> None:
         super().__init__()
+        if prediction_target not in ("noise", "image"):
+            raise ValueError("prediction_target must be 'noise' or 'image'.")
+        self.prediction_target = prediction_target
         if betas is None:
             if num_steps < 1:
                 raise ValueError("num_steps must be positive.")
@@ -130,6 +136,49 @@ class GaussianDiffusion(nn.Module):
         noisy_images = signal_scale * images + noise_scale * noise
         return noisy_images, noise
 
+    def estimate_clean_image(
+        self,
+        noisy_images: torch.Tensor,
+        timesteps: torch.Tensor,
+        prediction: torch.Tensor,
+    ) -> torch.Tensor:
+        """Estimate clean images from an existing model prediction.
+
+        Image predictions are returned directly. Noise predictions are converted
+        using the forward-diffusion equation. This method does not call the model,
+        sample noise, clip values, or detach gradients, so it can support image
+        losses during training. Images and predictions have shape [B, C, H, W];
+        timesteps are torch.long schedule indices shaped [B].
+        """
+        if noisy_images.ndim != 4 or not noisy_images.is_floating_point():
+            raise ValueError(
+                "noisy_images must be a floating-point tensor shaped [B, C, H, W]."
+            )
+        if (
+            timesteps.shape != (noisy_images.shape[0],)
+            or timesteps.dtype != torch.long
+        ):
+            raise ValueError("timesteps must have dtype torch.long and shape [B].")
+        if ((timesteps < 0) | (timesteps >= self.num_steps)).any():
+            raise ValueError("timesteps must be between 0 and num_steps - 1.")
+        if (
+            prediction.shape != noisy_images.shape
+            or not prediction.is_floating_point()
+            or prediction.device != noisy_images.device
+        ):
+            raise ValueError(
+                "prediction must be floating-point and match noisy_images' shape and device."
+            )
+        if self.prediction_target == "image":
+            return prediction
+
+        coefficient_indices = timesteps.to(self.betas.device)
+        signal_scale = self.sqrt_alphas_cumprod[coefficient_indices]
+        noise_scale = self.sqrt_one_minus_alphas_cumprod[coefficient_indices]
+        signal_scale = signal_scale.to(noisy_images).view(-1, 1, 1, 1)
+        noise_scale = noise_scale.to(noisy_images).view(-1, 1, 1, 1)
+        return (noisy_images - noise_scale * prediction) / signal_scale
+
     def forward_trajectory(
         self,
         images: torch.Tensor,
@@ -182,7 +231,7 @@ class GaussianDiffusion(nn.Module):
         metadata_mask: dict[str, torch.Tensor] | None = None,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Predict and sample the images at the preceding diffusion step."""
+        """Sample the preceding state using the configured prediction target."""
         if noisy_images.ndim != 4 or not noisy_images.is_floating_point():
             raise ValueError(
                 "noisy_images must be a floating-point tensor shaped [B, C, H, W]."
@@ -207,25 +256,44 @@ class GaussianDiffusion(nn.Module):
                 "omitting supplied sampling metadata.",
                 stacklevel=1,
             )
-        predicted_noise = model(noisy_images, timesteps, **conditioning)
-        if predicted_noise.shape != noisy_images.shape:
+        prediction = model(noisy_images, timesteps, **conditioning)
+        if prediction.shape != noisy_images.shape:
             raise ValueError(
                 "model output must have the same shape as noisy_images.")
 
         coefficient_indices = timesteps.to(self.betas.device)
-        mean_scale = self.sqrt_reciprocal_alphas[coefficient_indices]
-        noise_scale = (
-            self.betas[coefficient_indices]
-            / self.sqrt_one_minus_alphas_cumprod[coefficient_indices]
-        )
         variance = self.posterior_variance[coefficient_indices]
-
-        mean_scale = mean_scale.to(noisy_images).view(-1, 1, 1, 1)
-        noise_scale = noise_scale.to(noisy_images).view(-1, 1, 1, 1)
         variance = variance.to(noisy_images).view(-1, 1, 1, 1)
 
-        model_mean = mean_scale * \
-            (noisy_images - noise_scale * predicted_noise)
+        if self.prediction_target == "noise":
+            mean_scale = self.sqrt_reciprocal_alphas[coefficient_indices]
+            noise_scale = (
+                self.betas[coefficient_indices]
+                / self.sqrt_one_minus_alphas_cumprod[coefficient_indices]
+            )
+            mean_scale = mean_scale.to(noisy_images).view(-1, 1, 1, 1)
+            noise_scale = noise_scale.to(noisy_images).view(-1, 1, 1, 1)
+            model_mean = mean_scale * (noisy_images - noise_scale * prediction)
+        else:
+            # These are the Gaussian posterior coefficients from the DDPM formulation, Equation 7.
+            # q(x_previous | x_current, predicted_clean_image).
+            betas = self.betas[coefficient_indices]
+            previous_signal = self.alphas_cumprod[
+                (coefficient_indices - 1).clamp_min(0)
+            ]
+            final_step = coefficient_indices == 0
+            previous_signal = torch.where(
+                final_step, torch.ones_like(previous_signal), previous_signal
+            )
+            denominator = 1 - self.alphas_cumprod[coefficient_indices]
+            image_scale = betas * previous_signal.sqrt() / denominator
+            state_scale = (1 - previous_signal) * (1 - betas).sqrt() / denominator
+            # Schedule index zero returns the clean prediction exactly.
+            image_scale = torch.where(final_step, torch.ones_like(image_scale), image_scale)
+            image_scale = image_scale.to(noisy_images).view(-1, 1, 1, 1)
+            state_scale = state_scale.to(noisy_images).view(-1, 1, 1, 1)
+            model_mean = image_scale * prediction + state_scale * noisy_images
+
         random_noise = torch.randn(
             noisy_images.shape,
             device=noisy_images.device,

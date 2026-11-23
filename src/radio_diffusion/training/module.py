@@ -1,4 +1,4 @@
-"""Lightning module for training a DDPM noise predictor."""
+"""Lightning module for training DDPM noise or clean-image predictors."""
 
 import os
 from typing import Any
@@ -17,7 +17,7 @@ from radio_diffusion.training.losses import WeightedLoss
 
 
 class DDPMModule(LightningModule):
-    """Train a model to predict the noise added at random diffusion steps."""
+    """Train against the configured noise or clean-image target."""
 
     def __init__(
         self,
@@ -102,7 +102,7 @@ class DDPMModule(LightningModule):
             conditioning = {"metadata": metadata}
             if getattr(self.model, "use_validity_masks", False):
                 conditioning["metadata_mask"] = metadata_mask
-            predicted_noise = self._train_forward(
+            prediction = self._train_forward(
                 noisy_images, timesteps, **conditioning
             )
         else:
@@ -112,8 +112,9 @@ class DDPMModule(LightningModule):
                     f"omitting metadata fields: {', '.join(metadata)}."
                 )
                 self._warned_ignored_conditioning = True
-            predicted_noise = self._train_forward(noisy_images, timesteps)
-        loss, loss_terms = self.loss_function.compute(predicted_noise, noise)
+            prediction = self._train_forward(noisy_images, timesteps)
+        target = noise if self.diffusion.prediction_target == "noise" else images
+        loss, loss_terms = self.loss_function.compute(prediction, target)
 
         for name, term in loss_terms.items():
             self.log(
