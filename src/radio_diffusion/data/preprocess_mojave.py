@@ -28,7 +28,7 @@ import torch
 from astropy.io import fits
 from astropy.io.fits.verify import VerifyWarning
 from astropy.wcs import FITSFixedWarning
-from torchvision.transforms.functional import center_crop
+from torchvision.transforms.functional import crop
 from tqdm import tqdm
 
 from radio_diffusion.data.dataset_summary import (
@@ -40,6 +40,7 @@ from radio_diffusion.data.mojave_metadata import (
     METADATA_SCHEMA,
     JetOrientationSettings,
     RidgelineSettings,
+    crop_spatial_geometry,
     cropped_image_metadata,
     full_image_metadata,
 )
@@ -107,7 +108,13 @@ def process_observation(
             settings.jet_orientation, settings.ridgeline,
         )
         image = torch.from_numpy(image_hdul[0].data[0, 0].astype("float32"))
-        cropped_image = center_crop(image, settings.image_size).clone()
+        size = settings.image_size
+        height, width = image.shape
+        # Match torchvision's center_crop rounding and zero padding.
+        top = round(max(height - size, 0) / 2) - max(size - height, 0) // 2
+        left = round(max(width - size, 0) / 2) - max(size - width, 0) // 2
+        cropped_image = crop(image, top, left, size, size).clone()
+        metadata["spatial_geometry"] = crop_spatial_geometry(image_hdul[0].header, left, top)
         metadata.update(cropped_image_metadata(cropped_image))
         # Additional full-image features can use image_hdul and uv_hdul here.
         # uv_hdul is None when the observation has no matching UV file.

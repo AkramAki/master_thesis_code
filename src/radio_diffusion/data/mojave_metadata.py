@@ -39,6 +39,7 @@ class RidgelineSettings:
 METADATA_SCHEMA = {
     "source_name": {"type": "string"},
     "image_size": {"type": "integer_pair", "unit": "pixels"},
+    "spatial_geometry": {"type": "object"},
     "noise_rms_jy_per_beam": {"type": "number", "unit": "Jy/beam"},
     "noise_method": {"type": "string"},
     "peak_brightness_jy_per_beam": {"type": "number", "unit": "Jy/beam"},
@@ -404,6 +405,23 @@ def full_image_metadata(
         "jet_radial_extent_mas": ridge[-1]["radius_mas"] if ridge else float("nan"),
         "ridgeline_stop_reason": stopping_reason,
         "ridgeline_arc_clipped": any(point["arc_clipped"] for point in ridge),
+    }
+
+
+def crop_spatial_geometry(header: fits.Header, left: int, top: int) -> dict:
+    """Map zero-based crop (x, y) offsets to local east/north offsets in mas."""
+    x = (header["NAXIS1"] - 1) / 2
+    y = (header["NAXIS2"] - 1) / 2
+    wcs = WCS(header).celestial
+    centre = wcs.pixel_to_world(x, y)
+    neighbours = wcs.pixel_to_world([x + 1, x], [y, y + 1])
+    east, north = centre.spherical_offsets_to(neighbours)
+    matrix = np.stack([east.mas, north.mas])
+    if not np.isfinite(matrix).all() or np.linalg.det(matrix) == 0:
+        raise ValueError("Crop geometry requires a finite, invertible celestial pixel scale.")
+    return {
+        "reference_pixel_xy": [x - left, y - top],
+        "pixel_to_east_north_mas": matrix.tolist(),
     }
 
 
