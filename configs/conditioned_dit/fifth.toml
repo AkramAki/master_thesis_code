@@ -36,6 +36,7 @@ enabled = true
 transform = "linear"
 bounds = "per_image"
 log_scale = 1.0
+inverse_out_of_bounds = "linear"
 
 [diffusion]
 num_steps = 1000
@@ -56,9 +57,7 @@ amsgrad = false
 [trainer]
 max_epochs = 200
 accelerator = "gpu"
-devices = [
-    1,
-]
+devices = 4
 log_every_n_steps = 50
 check_val_every_n_epoch = 1
 
