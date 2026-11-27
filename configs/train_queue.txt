@@ -9,5 +9,8 @@
 # TORCHINDUCTOR_COMPILE_THREADS=1 \
 # python -m radio_diffusion.training.train_queue configs/train_queue.txt 
 
-conditioned_dit/first_conditioned_dit.toml
-conditioned_dit/second_conditioned_dit.toml
+# conditioned_dit/first_conditioned_dit.toml
+# conditioned_dit/second_conditioned_dit.toml
+conditioned_dit/third.toml
+conditioned_dit/fourth.toml
+conditioned_dit/fifth.toml

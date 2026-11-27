@@ -1,0 +1,94 @@
+[run]
+name = "optuna_trial_00020"
+seed = 42
+
+[model]
+type = "conditioned_dit"
+in_channels = 1
+out_channels = 1
+conditioning_params = [
+    "jet_pa_deg",
+    "jet_radial_extent_mas",
+    "cropped_image_pixel_minimum",
+    "cropped_image_pixel_maximum",
+]
+patch_size = 8
+hidden_size = 1024
+depth = 16
+num_heads = 16
+mlp_ratio = 4.0
+
+[model.conditioning_settings]
+use_validity_masks = true
+
+[data]
+type = "mojave"
+batch_size = 16
+num_workers = 10
+val_fraction = 0.1
+test_fraction = 0.1
+seed = 42
+image_size = 256
+variant = "mojave_unspecified"
+
+[data.normalization]
+enabled = true
+transform = "linear"
+bounds = "per_image"
+log_scale = 1.0
+
+[diffusion]
+num_steps = 1000
+beta_start = 0.0001
+beta_end = 0.02
+
+[optimizer]
+type = "AdamW"
+learning_rate = 0.0001
+weight_decay = 0.0
+betas = [
+    0.9,
+    0.999,
+]
+eps = 1e-08
+amsgrad = false
+
+[trainer]
+max_epochs = 200
+accelerator = "gpu"
+devices = [
+    4,
+]
+log_every_n_steps = 50
+check_val_every_n_epoch = 1
+
+[loss]
+loss = [
+    "MSELoss",
+]
+weights = [
+    1.0,
+]
+
+[samples]
+enabled = true
+num_samples = 16
+shape = [
+    16,
+    1,
+    256,
+    256,
+]
+every_n_epochs = 25
+seed = 42
+nrow = 4
+save_final_grid = true
+save_denoising_grids = True
+
+[samples.conditioning]
+mode = "auto"
+seed = 42
+
+[tracking]
+enabled = true
+study = "conditioning"
